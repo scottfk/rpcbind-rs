@@ -22,7 +22,9 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Phase 1 of 5 is in progress (branch `phase1-startup`). Done so far, in `crates/tirpc`:
+Phase 1 of 5 is done (branch `phase1-startup`, PR pending): the RPC layer in
+`crates/tirpc` and rpcbind's startup, with `NULL` calls and every rejection the RPC layer
+makes. In `crates/tirpc`:
 
 - `/etc/netconfig` (`getnetconfig.c`), with libtirpc's shared cache and its parsing
   quirks;
@@ -38,14 +40,18 @@ Phase 1 of 5 is in progress (branch `phase1-startup`). Done so far, in `crates/t
   connections, idle-connection cleanup;
 - the `sys` module: libc calls for sockets, stdio, users, signals and syslog.
 
-And in `crates/rpcbind`: `rpcbind.c` (options, the lock, transports from netconfig,
-the user switch, signals, the poll loop), `xlog.c`, `security.c`'s access check and `-l`
+In `crates/rpcbind`: `rpcbind.c` (options, the lock, transports from netconfig, the
+user switch, signals, the poll loop), `xlog.c`, `security.c`'s access check and `-l`
 logging, `rpcb_stat.c`'s counters, `check_bound.c`'s transport list, `network_init()`,
-and the v2/v3/v4 dispatchers for `NULL` and unknown procedures. A manual check in a
-namespace shows the same sockets, `/run` files and `NULL` replies as C rpcbind; the
-other procedures are phase 2.
+and the v2/v3/v4 dispatchers for `NULL` and unknown procedures. The other procedures
+are phase 2 (the port logs "not ported yet" and doesn't reply).
 
-Next: the differential harness and phase 1's test cases.
+The differential suite has 32 tests (61 cases, each run against both daemons): options,
+`-h`, startup failures, 20 netconfig variants, signals, rejections, authentication,
+UDP and stream framing, and many connections. All pass, and mutants that undo four of the
+reproduced quirks are each caught.
+
+Next: phase 2, the protocol.
 
 The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
 step lands.
@@ -82,27 +88,35 @@ The port follows the files:
 | `contrib/gentoo/` | a `net-nds/rpcbind` live ebuild, and how to switch and roll back |
 | `tools/` | the reference build |
 
-## Testing (planned)
+## Testing
 
-`make check` will build the C reference into `../rpcbind` if it isn't there, then run
-the differential suite. Each case starts C rpcbind and the port in turn, in a private
-user, mount and network namespace (a real root, its own loopback and test interfaces,
-its own `/run` and `/etc`), sends both the same sequence of requests, and compares:
+```sh
+make check
+```
 
-- every reply, byte for byte (the transaction ids are the test's own);
-- stdout, stderr, the exit status and syslog lines (captured on the sandbox's
-  `/dev/log`);
-- the sockets each daemon left listening (family, type, address, owner, mode of
-  `/run/rpcbind.sock`) and the files under `/run`.
+This builds the C reference into `../rpcbind` if it isn't there, then runs the unit
+tests and the differential suite ([crates/rpcbind/tests/](crates/rpcbind/tests/)). Each
+case starts C rpcbind and then the port, each in a private user, mount, network and pid
+namespace (ids mapped from your subordinate ranges, so there's a real root and the
+system's users exist; its own loopback, `/proc` and `/run`; `/dev/log` captured; the
+case's own `/etc/netconfig` if it has one), sends both the same requests with
+`rpcprobe` (raw datagrams, connections and record fragments), and compares:
 
-Requests come from three clients: the C reference `rpcinfo`, a small C probe linked
-with the system libtirpc (`rpcb_set()`, `pmap_set()`, `rpcb_getaddr()` and friends, as
-NFS daemons call them, including over the local socket as other users), and raw packets
-written by the test, for malformed, truncated, oversized and hostile input.
+- every reply, byte for byte, and which address UDP replies came from;
+- stdout, stderr, the exit status and every syslog line (time stamps and pids
+  normalized);
+- the sockets the daemon has bound (unconnected UDP, listening TCP, the local socket)
+  and `/run` (names, modes, owners) before and after the signal that ends it.
+
+To see what each case produced: `RPCBIND_DIFF_SHOW=1 cargo test -- --nocapture`. Each
+run's files stay in `target/difftest/<case>/{c,r}/`.
+
+Phase 2 adds C `rpcinfo` and a probe linked with the system libtirpc (`rpcb_set()`,
+`pmap_set()` and friends, as NFS daemons call them).
 
 ## Roadmap
 
-1. **Startup and the RPC layer (in progress, branch `phase1-startup`):** `crates/tirpc` (XDR, messages, auth, record marking,
+1. **Startup and the RPC layer (done, branch `phase1-startup`):** `crates/tirpc` (XDR, messages, auth, record marking,
    the three transports, netconfig, universal addresses, the dispatcher with its error
    replies), and `rpcbind.c`: options, `-v`, the lock, the rlimit and superuser checks,
    one transport per netconfig entry (`-h` addresses, `SO_REUSEADDR`, `IPV6_V6ONLY`,

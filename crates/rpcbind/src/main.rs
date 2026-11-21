@@ -450,6 +450,8 @@ impl Rpcbind {
 /// What C does when `-h '*'` reaches a second UDP transport: dereference NULL. A
 /// segmentation fault, so the way it dies matches.
 fn null_deref_crash() -> ! {
+    // Rust's runtime has its own SIGSEGV handler (for stack overflows).
+    sys::signal(libc::SIGSEGV, sys::Handler::Default);
     sys::raise(libc::SIGSEGV);
     std::process::abort();
 }

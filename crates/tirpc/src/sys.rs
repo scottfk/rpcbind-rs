@@ -442,6 +442,7 @@ pub fn wait_nohang() -> i32 {
 /// A signal disposition for [`signal`].
 #[derive(Debug, Clone, Copy)]
 pub enum Handler {
+    Default,
     Ignore,
     Func(extern "C" fn(c_int)),
 }
@@ -449,10 +450,11 @@ pub enum Handler {
 /// `signal(sig, handler)` (glibc's BSD semantics: `SA_RESTART`, not reset).
 pub fn signal(sig: i32, h: Handler) {
     let hv = match h {
+        Handler::Default => libc::SIG_DFL,
         Handler::Ignore => libc::SIG_IGN,
         Handler::Func(f) => f as usize,
     };
-    // SAFETY: hv is SIG_IGN or an extern "C" fn(c_int).
+    // SAFETY: hv is SIG_DFL, SIG_IGN or an extern "C" fn(c_int).
     unsafe { libc::signal(sig, hv) };
 }
 

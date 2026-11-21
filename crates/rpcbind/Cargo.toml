@@ -17,3 +17,9 @@ tirpc = { path = "../tirpc" }
 
 [lints]
 workspace = true
+
+# Test tool for the differential tests (not installed).
+[[bin]]
+name = "rpcprobe"
+path = "tests/probe/main.rs"
+test = false
