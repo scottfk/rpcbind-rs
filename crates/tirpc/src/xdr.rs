@@ -157,6 +157,18 @@ impl<'a> XdrMem<'a> {
         XdrMem { buf, pos: 0, handy }
     }
 
+    /// A stream over `buf` positioned at `pos` with `handy` bytes left, to carry on
+    /// where an earlier one stopped (`svc_dg` decodes the arguments from the same
+    /// `XDR` that decoded the call header).
+    pub fn resume(buf: &'a mut [u8], pos: usize, handy: usize) -> XdrMem<'a> {
+        XdrMem { buf, pos, handy }
+    }
+
+    /// `x_handy`.
+    pub fn handy(&self) -> usize {
+        self.handy
+    }
+
     /// `XDR_GETPOS()`.
     pub fn getpos(&self) -> usize {
         self.pos

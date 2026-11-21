@@ -33,11 +33,19 @@ Phase 1 of 5 is in progress (branch `phase1-startup`). Done so far, in `crates/t
   where reply fragments are split;
 - call decoding, reply encoding and server-side authentication (`rpc_callmsg.c`,
   `rpc_prot.c`, `svc_auth.c`, `svc_auth_unix.c`);
-- the `sys` module: libc calls for sockets, stdio and the address functions.
+- the transports and dispatcher (`svc.c`, `svc_dg.c`, `svc_vc.c`, `svc_generic.c`):
+  callouts, poll slots, error replies, UDP with pktinfo replies, non-blocking
+  connections, idle-connection cleanup;
+- the `sys` module: libc calls for sockets, stdio, users, signals and syslog.
 
-Next: the transports and dispatcher (`svc.c`, `svc_dg.c`, `svc_vc.c`), then
-`rpcbind.c`'s startup and the differential harness. The `rpcbind` binary is a stub until
-then.
+And in `crates/rpcbind`: `rpcbind.c` (options, the lock, transports from netconfig,
+the user switch, signals, the poll loop), `xlog.c`, `security.c`'s access check and `-l`
+logging, `rpcb_stat.c`'s counters, `check_bound.c`'s transport list, `network_init()`,
+and the v2/v3/v4 dispatchers for `NULL` and unknown procedures. A manual check in a
+namespace shows the same sockets, `/run` files and `NULL` replies as C rpcbind; the
+other procedures are phase 2.
+
+Next: the differential harness and phase 1's test cases.
 
 The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
 step lands.

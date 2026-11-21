@@ -308,3 +308,374 @@ pub fn exit(status: i32) -> ! {
     // SAFETY: exit never returns.
     unsafe { libc::exit(status) }
 }
+
+// ---------------------------------------------------------------------------
+// files, processes and users (for rpcbind.c)
+
+/// `open(path, flags, mode)`.
+pub fn open(path: &[u8], flags: i32, mode: u32) -> Fd {
+    let p = cstring(path);
+    // SAFETY: p is NUL-terminated.
+    unsafe { libc::open(p.as_ptr(), flags, mode) }
+}
+
+/// `flock(fd, op)`.
+pub fn flock(fd: Fd, op: i32) -> i32 {
+    // SAFETY: no memory arguments.
+    unsafe { libc::flock(fd, op) }
+}
+
+/// `unlink(path)`.
+pub fn unlink(path: &[u8]) -> i32 {
+    let p = cstring(path);
+    // SAFETY: p is NUL-terminated.
+    unsafe { libc::unlink(p.as_ptr()) }
+}
+
+/// `umask(mask)`.
+pub fn umask(mask: u32) -> u32 {
+    // SAFETY: no memory arguments.
+    unsafe { libc::umask(mask) }
+}
+
+/// `getrlimit(RLIMIT_NOFILE)`, as (cur, max).
+pub fn getrlimit_nofile() -> (u64, u64) {
+    let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: rl is a valid rlimit.
+    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) };
+    (rl.rlim_cur, rl.rlim_max)
+}
+
+/// `setrlimit(RLIMIT_NOFILE, {cur, max})`.
+pub fn setrlimit_nofile(cur: u64, max: u64) -> i32 {
+    let rl = libc::rlimit { rlim_cur: cur, rlim_max: max };
+    // SAFETY: rl is a valid rlimit.
+    unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rl) }
+}
+
+/// `geteuid()`.
+pub fn geteuid() -> u32 {
+    // SAFETY: no arguments.
+    unsafe { libc::geteuid() }
+}
+
+unsafe extern "C" {
+    fn __nss_configure_lookup(db: *const c_char, service_line: *const c_char) -> c_int;
+    fn getrpcbynumber(number: c_int) -> *mut RpcEnt;
+}
+
+#[repr(C)]
+struct RpcEnt {
+    r_name: *mut c_char,
+    r_aliases: *mut *mut c_char,
+    r_number: c_int,
+}
+
+/// glibc's `__nss_configure_lookup(db, modules)`.
+pub fn nss_configure_lookup(db: &[u8], modules: &[u8]) {
+    let (d, m) = (cstring(db), cstring(modules));
+    // SAFETY: both strings are NUL-terminated; glibc copies what it keeps.
+    unsafe { __nss_configure_lookup(d.as_ptr(), m.as_ptr()) };
+}
+
+/// `getrpcbynumber(n)->r_name`.
+pub fn rpc_name(n: i32) -> Option<Vec<u8>> {
+    // SAFETY: getrpcbynumber returns NULL or a pointer to static storage, read at once.
+    unsafe {
+        let e = getrpcbynumber(n);
+        if e.is_null() { None } else { Some(CStr::from_ptr((*e).r_name).to_bytes().to_vec()) }
+    }
+}
+
+/// `getpwnam(name)`: (uid, gid).
+pub fn getpwnam(name: &[u8]) -> Option<(u32, u32)> {
+    let n = cstring(name);
+    // SAFETY: n is NUL-terminated; the result is NULL or static storage, read at once.
+    unsafe {
+        let p = libc::getpwnam(n.as_ptr());
+        if p.is_null() { None } else { Some(((*p).pw_uid, (*p).pw_gid)) }
+    }
+}
+
+/// `setgid(gid)`.
+pub fn setgid(gid: u32) -> i32 {
+    // SAFETY: no memory arguments.
+    unsafe { libc::setgid(gid) }
+}
+
+/// `setgroups(0, NULL)`.
+pub fn setgroups_none() -> i32 {
+    // SAFETY: an empty list with a null pointer is allowed.
+    unsafe { libc::setgroups(0, std::ptr::null()) }
+}
+
+/// `setuid(uid)`.
+pub fn setuid(uid: u32) -> i32 {
+    // SAFETY: no memory arguments.
+    unsafe { libc::setuid(uid) }
+}
+
+/// `daemon(0, 0)`.
+pub fn daemon() -> i32 {
+    // SAFETY: no memory arguments.
+    unsafe { libc::daemon(0, 0) }
+}
+
+/// `fork()`.
+pub fn fork() -> i32 {
+    // SAFETY: the program is single-threaded.
+    unsafe { libc::fork() }
+}
+
+/// `_exit(status)`.
+pub fn _exit(status: i32) -> ! {
+    // SAFETY: _exit never returns.
+    unsafe { libc::_exit(status) }
+}
+
+/// `wait3(NULL, WNOHANG, NULL)`.
+pub fn wait_nohang() -> i32 {
+    // SAFETY: null status and rusage pointers are allowed.
+    unsafe { libc::wait4(-1, std::ptr::null_mut(), libc::WNOHANG, std::ptr::null_mut()) }
+}
+
+/// A signal disposition for [`signal`].
+#[derive(Debug, Clone, Copy)]
+pub enum Handler {
+    Ignore,
+    Func(extern "C" fn(c_int)),
+}
+
+/// `signal(sig, handler)` (glibc's BSD semantics: `SA_RESTART`, not reset).
+pub fn signal(sig: i32, h: Handler) {
+    let hv = match h {
+        Handler::Ignore => libc::SIG_IGN,
+        Handler::Func(f) => f as usize,
+    };
+    // SAFETY: hv is SIG_IGN or an extern "C" fn(c_int).
+    unsafe { libc::signal(sig, hv) };
+}
+
+/// `openlog(ident, LOG_PID, facility)`. The identity string is leaked, as syslog keeps
+/// the pointer.
+pub fn openlog(ident: &[u8], facility: i32) {
+    let s = Box::leak(cstring(ident).into_boxed_c_str());
+    // SAFETY: s lives forever.
+    unsafe { libc::openlog(s.as_ptr(), libc::LOG_PID, facility) };
+}
+
+/// `syslog(pri, "%s", msg)`.
+pub fn syslog(pri: i32, msg: &[u8]) {
+    let m = cstring(msg);
+    // SAFETY: a constant format with one string argument.
+    unsafe { libc::syslog(pri, c"%s".as_ptr(), m.as_ptr()) };
+}
+
+/// The basename of `argv[0]` (`program_invocation_short_name`), for `err()`.
+pub fn progname() -> Vec<u8> {
+    unsafe extern "C" {
+        static program_invocation_short_name: *const c_char;
+    }
+    // SAFETY: glibc sets it before main.
+    unsafe { CStr::from_ptr(program_invocation_short_name) }.to_bytes().to_vec()
+}
+
+/// One `getaddrinfo()` result: family, socket type, protocol and the address.
+#[derive(Debug, Clone)]
+pub struct AddrInfo {
+    pub family: i32,
+    pub socktype: i32,
+    pub protocol: i32,
+    pub addr: Vec<u8>,
+}
+
+/// `getaddrinfo(host, service, hints)`: the first result, or the error code.
+pub fn getaddrinfo(
+    host: Option<&[u8]>,
+    service: &[u8],
+    flags: i32,
+    family: i32,
+    socktype: i32,
+    protocol: i32,
+) -> Result<AddrInfo, i32> {
+    let h = host.map(cstring);
+    let s = cstring(service);
+    // SAFETY: an all-zero addrinfo is a valid hints struct.
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_flags = flags;
+    hints.ai_family = family;
+    hints.ai_socktype = socktype;
+    hints.ai_protocol = protocol;
+    let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+    // SAFETY: the strings are NUL-terminated (host may be NULL); res receives a list
+    // freed below.
+    let r =
+        unsafe { libc::getaddrinfo(h.as_ref().map_or(std::ptr::null(), |h| h.as_ptr()), s.as_ptr(), &hints, &mut res) };
+    if r != 0 {
+        return Err(r);
+    }
+    // SAFETY: on success res points to at least one addrinfo with ai_addrlen bytes of
+    // address.
+    let out = unsafe {
+        let a = &*res;
+        let addr = std::slice::from_raw_parts(a.ai_addr.cast::<u8>(), a.ai_addrlen as usize).to_vec();
+        AddrInfo { family: a.ai_family, socktype: a.ai_socktype, protocol: a.ai_protocol, addr }
+    };
+    // SAFETY: res came from getaddrinfo.
+    unsafe { libc::freeaddrinfo(res) };
+    Ok(out)
+}
+
+/// `gai_strerror(code)`.
+pub fn gai_strerror(code: i32) -> Vec<u8> {
+    // SAFETY: gai_strerror returns a static string.
+    unsafe { CStr::from_ptr(libc::gai_strerror(code)) }.to_bytes().to_vec()
+}
+
+/// `getnameinfo(addr, len, host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST)`: the host, or
+/// whatever the buffer held (empty) on failure, as C ignores the result.
+pub fn getnameinfo_numeric(addr: &[u8], len: usize) -> Vec<u8> {
+    let mut ss = [0u8; SS_LEN];
+    let n = addr.len().min(SS_LEN);
+    ss[..n].copy_from_slice(&addr[..n]);
+    let mut host = [0 as c_char; 1025];
+    // SAFETY: ss holds len (clamped) bytes; host is NI_MAXHOST bytes.
+    unsafe {
+        libc::getnameinfo(
+            ss.as_ptr().cast(),
+            len.min(SS_LEN) as libc::socklen_t,
+            host.as_mut_ptr(),
+            host.len() as libc::socklen_t,
+            std::ptr::null_mut(),
+            0,
+            libc::NI_NUMERICHOST,
+        );
+        CStr::from_ptr(host.as_ptr()).to_bytes().to_vec()
+    }
+}
+
+/// One `getifaddrs()` entry.
+#[derive(Debug, Clone)]
+pub struct IfAddr {
+    pub name: Vec<u8>,
+    pub flags: u32,
+    /// The address and netmask as raw sockaddr bytes (`sockaddr_storage` size), if any.
+    pub addr: Option<Vec<u8>>,
+    pub netmask: Option<Vec<u8>>,
+}
+
+/// `getifaddrs()`, in the list's order.
+pub fn getifaddrs() -> Option<Vec<IfAddr>> {
+    let mut ifp: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: ifp receives a list freed below.
+    if unsafe { libc::getifaddrs(&mut ifp) } < 0 {
+        return None;
+    }
+    let sa = |p: *mut libc::sockaddr| -> Option<Vec<u8>> {
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: a non-null address in the list points to a sockaddr whose family
+        // says its size; copying sockaddr_storage bytes could overrun a short one, so
+        // copy by family.
+        unsafe {
+            let n = match i32::from((*p).sa_family) {
+                libc::AF_INET => size_of::<libc::sockaddr_in>(),
+                libc::AF_INET6 => size_of::<libc::sockaddr_in6>(),
+                _ => size_of::<libc::sockaddr>(),
+            };
+            let mut v = std::slice::from_raw_parts(p.cast::<u8>(), n).to_vec();
+            v.resize(SS_LEN, 0);
+            Some(v)
+        }
+    };
+    let mut out = Vec::new();
+    let mut p = ifp;
+    while !p.is_null() {
+        // SAFETY: p is a node of the list from getifaddrs.
+        unsafe {
+            let a = &*p;
+            out.push(IfAddr {
+                name: CStr::from_ptr(a.ifa_name).to_bytes().to_vec(),
+                flags: a.ifa_flags,
+                addr: sa(a.ifa_addr),
+                netmask: sa(a.ifa_netmask),
+            });
+            p = a.ifa_next;
+        }
+    }
+    // SAFETY: ifp came from getifaddrs.
+    unsafe { libc::freeifaddrs(ifp) };
+    Some(out)
+}
+
+/// `if_nametoindex(name)`.
+pub fn if_nametoindex(name: &[u8]) -> u32 {
+    let n = cstring(name);
+    // SAFETY: n is NUL-terminated.
+    unsafe { libc::if_nametoindex(n.as_ptr()) }
+}
+
+/// `setsockopt(s, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq6, sizeof mreq6)`.
+pub fn ipv6_join_group(fd: Fd, group: &[u8; 16], ifindex: u32) -> i32 {
+    let m = libc::ipv6_mreq { ipv6mr_multiaddr: libc::in6_addr { s6_addr: *group }, ipv6mr_interface: ifindex };
+    // SAFETY: m is an ipv6_mreq of the size passed.
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            libc::IPV6_ADD_MEMBERSHIP, // IPV6_JOIN_GROUP
+            (&m as *const libc::ipv6_mreq).cast(),
+            size_of::<libc::ipv6_mreq>() as libc::socklen_t,
+        )
+    }
+}
+
+/// `getopt(argc, argv, optstring)` over a C argument vector kept alive by [`Args`].
+#[derive(Debug)]
+pub struct Args {
+    _strings: Vec<CString>,
+    ptrs: Vec<*mut c_char>,
+}
+
+impl Args {
+    /// The process's arguments, as C `argv`.
+    pub fn from_env() -> Args {
+        use std::os::unix::ffi::OsStringExt;
+        let strings: Vec<CString> =
+            std::env::args_os().map(|a| CString::new(a.into_vec()).unwrap_or_default()).collect();
+        let mut ptrs: Vec<*mut c_char> = strings.iter().map(|s| s.as_ptr() as *mut c_char).collect();
+        ptrs.push(std::ptr::null_mut());
+        Args { _strings: strings, ptrs }
+    }
+
+    /// `argv[0]`.
+    pub fn argv0(&self) -> Vec<u8> {
+        // SAFETY: ptrs[0] is one of the CStrings (argv always has argv[0] here).
+        unsafe { CStr::from_ptr(self.ptrs[0]) }.to_bytes().to_vec()
+    }
+
+    /// `getopt()`: the option character (as an int: '?' for errors), or -1, with
+    /// `optarg`. glibc prints its own messages to stderr, as for C rpcbind.
+    pub fn getopt(&mut self, optstring: &std::ffi::CStr) -> (i32, Option<Vec<u8>>) {
+        unsafe extern "C" {
+            static mut optarg: *mut c_char;
+        }
+        let argc = (self.ptrs.len() - 1) as c_int;
+        // SAFETY: ptrs is a NULL-terminated array of pointers to live strings; getopt
+        // permutes the array, which we own.
+        let c = unsafe { libc::getopt(argc, self.ptrs.as_mut_ptr(), optstring.as_ptr()) };
+        // SAFETY: optarg is set by getopt to NULL or into one of our strings.
+        let arg = unsafe {
+            let p = optarg;
+            if p.is_null() { None } else { Some(CStr::from_ptr(p).to_bytes().to_vec()) }
+        };
+        (c, arg)
+    }
+}
+
+/// `raise(sig)`.
+pub fn raise(sig: i32) -> i32 {
+    // SAFETY: no memory arguments.
+    unsafe { libc::raise(sig) }
+}

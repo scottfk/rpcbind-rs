@@ -178,9 +178,6 @@ pub struct NetconfigDb {
     entries: Vec<Netconfig>,
     /// `nc_error`.
     pub error: i32,
-    /// Messages libtirpc writes to stderr (`getnetconfigent("unix")`), for the caller to
-    /// print where C would.
-    pub stderr: Vec<u8>,
 }
 
 impl Default for NetconfigDb {
@@ -192,15 +189,7 @@ impl Default for NetconfigDb {
 impl NetconfigDb {
     /// A database reading `path` instead of `/etc/netconfig` (for tests).
     pub fn with_path(path: &str) -> NetconfigDb {
-        NetconfigDb {
-            path: path.to_string(),
-            file: None,
-            eof: false,
-            refs: 0,
-            entries: Vec::new(),
-            error: 0,
-            stderr: Vec::new(),
-        }
+        NetconfigDb { path: path.to_string(), file: None, eof: false, refs: 0, entries: Vec::new(), error: 0 }
     }
 
     /// `setnetconfig()`.
@@ -289,10 +278,8 @@ impl NetconfigDb {
             return None;
         }
         if netid == b"unix" {
-            self.stderr.extend_from_slice(
-                b"The local transport is called \"unix\" in /etc/netconfig.\n\
-                  Please change this to \"local\" manually or run mergemaster(8).\n",
-            );
+            crate::sys::c_stderr(b"The local transport is called \"unix\" in /etc/netconfig.\n");
+            crate::sys::c_stderr(b"Please change this to \"local\" manually or run mergemaster(8).\n");
         }
         if !self.entries.is_empty() {
             if let Some(nc) = self.entries.iter().find(|e| e.netid == netid) {
