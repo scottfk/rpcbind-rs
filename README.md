@@ -22,7 +22,19 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Just started: project docs and the reference build.
+Phase 1 of 5 is in progress (branch `phase1-startup`). Done so far, in `crates/tirpc`:
+
+- `/etc/netconfig` (`getnetconfig.c`), with libtirpc's shared cache and its parsing
+  quirks;
+- universal and transport address conversions (`rpc_generic.c`);
+- the `sys` module (`inet_ntop`, `inet_pton`, `atoi` from the C library).
+
+Next: XDR and RPC messages, record marking, the three transports, the dispatcher, then
+`rpcbind.c`'s startup and the differential harness. The `rpcbind` binary is a stub until
+then.
+
+The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
+step lands.
 
 The reference is the `rpcbind-1.2.8` release tarball, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)), against the system libtirpc
@@ -76,26 +88,26 @@ written by the test, for malformed, truncated, oversized and hostile input.
 
 ## Roadmap
 
-1. **Startup and the RPC layer:** `crates/tirpc` (XDR, messages, auth, record marking,
+1. **Startup and the RPC layer (in progress, branch `phase1-startup`):** `crates/tirpc` (XDR, messages, auth, record marking,
    the three transports, netconfig, universal addresses, the dispatcher with its error
    replies), and `rpcbind.c`: options, `-v`, the lock, the rlimit and superuser checks,
    one transport per netconfig entry (`-h` addresses, `SO_REUSEADDR`, `IPV6_V6ONLY`,
    the local socket and its mode), the privilege drop, signals, `daemon()` and the
    loop. Tested with `NULL` calls on every program and version, and the rejections
    (wrong program, version, procedure, RPC version, auth) for everything else.
-2. **The protocol:** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
+2. **The protocol (planned):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
    `SET`/`UNSET` with owners taken from local-socket credentials, `GETADDR` and
    `GETVERSADDR` with `addrmerge()` choosing the interface address, `DUMP`,
    `GETADDRLIST`, `GETTIME`, `UADDR2TADDR`/`TADDR2UADDR`, `GETSTAT` counters, and the
    access checks and `-i`/`-l` logging (`security.c`). Tested with C `rpcinfo`, the
    libtirpc probe and several interfaces in the test namespace.
-3. **Hostile input:** malformed and truncated XDR, oversized and fragmented records,
+3. **Hostile input (planned):** malformed and truncated XDR, oversized and fragmented records,
    idle and half-open connections, many clients at once, and the cases behind past
    CVEs (CVE-2017-8779 "rpcbomb" and CVE-2015-7236), checked for the same replies and
    bounded memory.
-4. **rpcinfo:** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
+4. **rpcinfo (planned):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
    `-n`), run against both daemons.
-5. **Packaging:** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
+5. **Packaging (planned):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
    conf.d), rehearsed on the test VM with a real NFS client and server stack
    (`rpc.statd`, `rpc.mountd`, `nfsd`, a mount and file locks), and rolled back through a
    binary package of the C build.
