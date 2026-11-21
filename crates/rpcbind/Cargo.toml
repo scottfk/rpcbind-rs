@@ -1,0 +1,19 @@
+[package]
+name = "rpcbind"
+description = "Drop-in Rust port of rpcbind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rpcbind"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+tirpc = { path = "../tirpc" }
+
+[lints]
+workspace = true

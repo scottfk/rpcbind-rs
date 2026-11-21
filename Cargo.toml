@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/tirpc", "crates/rpcbind"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+repository = "https://github.com/scottfk/rpcbind-rs"
+rust-version = "1.88"
+
+[workspace.dependencies]
+libc = "0.2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
