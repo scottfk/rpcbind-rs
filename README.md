@@ -27,9 +27,15 @@ Phase 1 of 5 is in progress (branch `phase1-startup`). Done so far, in `crates/t
 - `/etc/netconfig` (`getnetconfig.c`), with libtirpc's shared cache and its parsing
   quirks;
 - universal and transport address conversions (`rpc_generic.c`);
-- the `sys` module (`inet_ntop`, `inet_pton`, `atoi` from the C library).
+- XDR primitives and the memory stream (`xdr.c`, `xdr_mem.c`), making the same stream
+  calls in the same order as libtirpc;
+- the record-marking stream in its non-blocking server mode (`xdr_rec.c`), including
+  where reply fragments are split;
+- call decoding, reply encoding and server-side authentication (`rpc_callmsg.c`,
+  `rpc_prot.c`, `svc_auth.c`, `svc_auth_unix.c`);
+- the `sys` module: libc calls for sockets, stdio and the address functions.
 
-Next: XDR and RPC messages, record marking, the three transports, the dispatcher, then
+Next: the transports and dispatcher (`svc.c`, `svc_dg.c`, `svc_vc.c`), then
 `rpcbind.c`'s startup and the differential harness. The `rpcbind` binary is a stub until
 then.
 

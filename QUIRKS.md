@@ -22,3 +22,12 @@ cosmetic or hard to hit.
 |---|---|---|---|
 | low | The universal address of an unnamed local socket (length 2) is read past the address, up to a NUL, because `%.*s` gets a precision of -1. | `tirpc::addr` (`taddr2uaddr_af`) | unit `local_paths`; differential in phase 2 |
 | low | Port parts of a universal address go through `atoi()` and are combined as `hi << 8 \| lo` before `htons()` truncates them, so out-of-range parts (`999.999`) wrap instead of failing. | `tirpc::addr` (`uaddr2taddr_af`) | unit `port_parts_wrap_like_c` |
+
+## RPC layer (libtirpc)
+
+| Severity | Quirk | Where | Test |
+|---|---|---|---|
+| medium | On a TCP or local connection, every record fragment is taken as a whole call, `LAST_FRAG` or not: in non-blocking mode `last_frag` starts true and is never cleared. A call sent in several fragments is decoded from its first fragment, and each later fragment's first word is read as a record header. | `tirpc::xdr_rec` (`getrec`) | differential in phase 1 |
+| low | A short `AUTH_SYS` credential is parsed from the bytes past its end, left over in a stack buffer from earlier calls, before the length check rejects it; the `bad auth_len` line `_svcauth_unix()` prints to stdout shows those leftover numbers. | `tirpc::rpc` (`svcauth_unix`, `CredArea`) | unit `auth_sys` |
+| low | For `AUTH_SYS` calls, the reply's verifier is the client's own verifier (flavor and bytes) whenever it isn't empty; other flavors get `AUTH_NONE`. | `tirpc::rpc` (`svcauth_unix`) | unit `auth_sys`; differential in phase 1 |
+| low | A call that isn't a call, or has an RPC version other than 2, gets no reply (no `RPC_MISMATCH`): over UDP it's dropped, and on a connection the connection is closed. | `tirpc::rpc` (`decode_call`) | differential in phase 1 |

@@ -5,4 +5,7 @@
 
 pub mod addr;
 pub mod netconfig;
+pub mod rpc;
 pub mod sys;
+pub mod xdr;
+pub mod xdr_rec;
