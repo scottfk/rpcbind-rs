@@ -22,7 +22,7 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Phase 1 of 5 is done (branch `phase1-startup`, PR pending): the RPC layer in
+Phase 1 of 5 is done (branch `phase1-startup`, PR #2): the RPC layer in
 `crates/tirpc` and rpcbind's startup, with `NULL` calls and every rejection the RPC layer
 makes. In `crates/tirpc`:
 
@@ -116,7 +116,7 @@ Phase 2 adds C `rpcinfo` and a probe linked with the system libtirpc (`rpcb_set(
 
 ## Roadmap
 
-1. **Startup and the RPC layer (done, branch `phase1-startup`):** `crates/tirpc` (XDR, messages, auth, record marking,
+1. **Startup and the RPC layer (done, PR #2):** `crates/tirpc` (XDR, messages, auth, record marking,
    the three transports, netconfig, universal addresses, the dispatcher with its error
    replies), and `rpcbind.c`: options, `-v`, the lock, the rlimit and superuser checks,
    one transport per netconfig entry (`-h` addresses, `SO_REUSEADDR`, `IPV6_V6ONLY`,
