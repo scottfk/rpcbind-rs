@@ -23,7 +23,7 @@ something fun for me to tinker with in Claude.
 ## Status
 
 Phases 1 and 2 of 5 are done: phase 1 is merged (PR #2) and phase 2, the protocol, is
-on branch `phase2-protocol` (PR pending). The port now serves every procedure C
+on branch `phase2-protocol` (PR #3). The port now serves every procedure C
 rpcbind does in this build.
 
 Phase 1, the RPC layer in `crates/tirpc` and rpcbind's startup:
@@ -127,7 +127,7 @@ in `crates/rpcbind/tests/shim/`) for `GETTIME`.
    the local socket and its mode), the privilege drop, signals, `daemon()` and the
    loop. Tested with `NULL` calls on every program and version, and the rejections
    (wrong program, version, procedure, RPC version, auth) for everything else.
-2. **The protocol (done, branch `phase2-protocol`):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
+2. **The protocol (done, PR #3):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
    `SET`/`UNSET` with owners taken from local-socket credentials, `GETADDR` and
    `GETVERSADDR` with `addrmerge()` choosing the interface address, `DUMP`,
    `GETADDRLIST`, `GETTIME`, `UADDR2TADDR`/`TADDR2UADDR`, `GETSTAT` counters, and the
