@@ -10,7 +10,6 @@ pub const L_ALL: i32 = 0xFF00;
 pub const D_ALL: i32 = 0x00FF;
 /// rpcbind passes syslog's `LOG_DEBUG` (7) as the kind for its debug messages, which
 /// xlog reads as debug facilities 1-3.
-#[allow(dead_code)] // the protocol code logs with it, in phase 2
 pub const LOG_DEBUG_KIND: i32 = libc::LOG_DEBUG;
 
 /// xlog's globals.

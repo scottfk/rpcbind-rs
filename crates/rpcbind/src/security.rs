@@ -48,7 +48,6 @@ pub fn is_loopback(acc: &Access, nb: &Netbuf) -> bool {
 }
 
 /// `is_localroot()`.
-#[allow(dead_code)] // used by SET/UNSET, in phase 2
 pub fn is_localroot(acc: &Access, nb: &Netbuf) -> bool {
     let port = u16::from_be_bytes([nb.buf.get(2).copied().unwrap_or(0), nb.buf.get(3).copied().unwrap_or(0)]);
     match family(nb) {

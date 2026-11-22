@@ -46,3 +46,20 @@ cosmetic or hard to hit.
 | low | The local socket is set up first, from `getnetconfigent("local")` (or `"unix"`), and its failure goes to syslog only, as `<argv[0]>: can't find local transport` with a trailing newline. | `main.rs` (`main`) | `netconfig_no_local` |
 | low | `network_init()` joins the RPC IPv6 multicast group on a socket it then closes, which leaves the group again: it has no effect. | `util.rs` (`network_init`) | none (not observable) |
 | low | The "cannot get local address" message for a stream transport is also `printf()`ed to stdout, without a newline. | `main.rs` (`init_transport`) | none (needs a broken services database) |
+
+## Protocol (rpcb_svc*.c, pmap_svc.c, util.c)
+
+| Severity | Quirk | Where | Test |
+|---|---|---|---|
+| **high** | `GETADDR`, `GETVERSADDR` and `GETADDRLIST` pick the interface address to return with `addrmerge()`, which prefers the first "normal" interface over loopback and point-to-point ones whenever the caller's address isn't an exact interface address: a caller at 127.0.0.5 is told a LAN address. | `util.rs` (`addrmerge`) | `getaddr_merging` |
+| medium | `UNSET` (and portmap's) stops at the first matching entry the caller doesn't own: entries it already removed stay removed, the portmap list isn't updated for them, and the answer is FALSE. | `rpcb_svc_com.rs` (`map_unset`) | `owners` |
+| medium | Netids are compared without case: an entry registered as `UDP` clashes with `udp`, and `GETADDR` on transport `udp` finds it. | `rpcb_svc_com.rs` (`find_service`, `map_unset`) | `set_unset_sequences` |
+| medium | An empty netid in `UNSET` removes the program and version on every netid. Portmap `UNSET` unsets on `tcptrans` and `udptrans`, which are `""` when there's no IPv4 transport of that kind, so it removes every netid then; portmap `SET` with such a protocol registers under the netid `""`. | `rpcb_svc_com.rs` (`map_unset`), `pmap_svc.rs` | `set_unset_sequences`, `portmap_without_ipv4` |
+| medium | `GETADDRLIST` sends no reply at all if any registration of the program and version has a netid rpcbind doesn't serve (anyone on the local socket can make one). | `rpcb_svc_4.rs` (`getaddrlist`) | `getaddrlist_unknown_netid` |
+| low | Portmap's `SET` builds the address from the port's low 16 bits, but the portmap list keeps the whole 32-bit number, which `GETPORT` and `DUMP` return. | `pmap_svc.rs`, `rpcb_svc_com.rs` (`uaddr2port`) | `portmap` |
+| low | `GETADDR` with another version registered answers with that version's address (`RPCB_ALLVERS`), as does portmap `GETPORT`. | `rpcb_svc_com.rs` (`getaddr_com`), `pmap_svc.rs` | `getaddr_merging`, `portmap` |
+| medium | Owners: over the local socket the caller's uid; otherwise "superuser" only from a reserved port on loopback, else "unknown". Any local user calling over loopback UDP or TCP from an unprivileged port is "unknown" too, so can unset any registration made the same way. | `rpcb_svc_com.rs` (`getowner`) | `owners` |
+| low | `CALLIT`, `INDIRECT` and `BCAST` are still served with remote calls compiled out: the arguments (of any length: C allocates it first) are decoded, access-checked (with the "indirect call not allowed" log), looked up and counted; then there's no forwarding socket, so `INDIRECT` gets `SYSTEM_ERR` and the others nothing. Over a stream transport they're ignored. | `rpcb_svc_com.rs` (`callit_com`) | `remote_calls*` |
+| low | A new remote-call statistics entry starts with `indirect = 1` whatever the procedure; `PMAP_GETPORT` statistics count a found port as a success using `udptrans` as the address. | `rpcb_stat.rs`, `pmap_svc.rs` | `remote_calls`, `getaddr_merging` |
+| low | The address conversions use the family of the transport the call came in on, not the family in the address; a `TADDR2UADDR` netbuf shorter than that family's sockaddr gives "". | `rpcb_svc_com.rs` (`*_com`) | `address_conversion` |
+| low | A `DUMP` (or any reply) over UDP that doesn't fit in 9000 bytes gets `SYSTEM_ERR`, after the partial reply was encoded into the shared buffer. | `rpcb_svc.rs` (`serve`) | `big_dump` |

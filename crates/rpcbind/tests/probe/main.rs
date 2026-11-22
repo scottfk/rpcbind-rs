@@ -11,6 +11,10 @@
 //!   silence; prints `record HEX` (each fragment's header included), `eof`, `partial HEX`
 //!   or `nodata`.
 //! - `close NAME`
+//! - `ucall UID unix PATH HEX` - in a child running as
+//!   UID: connect, send HEX, read one record; prints what `recv` would.
+//! - `run CMD ARGS...` - run a program (`@T@/bin/tirpcprobe ...`), print its output.
+//! - `timeout MS` - wait this long for replies from now on (default 500)
 //! - `sleep MS`
 //!
 //! Every line printed starts with the command's line number, so output stays aligned.
@@ -21,7 +25,14 @@ use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-const WAIT: Duration = Duration::from_millis(500);
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// How long to wait for a reply (`timeout MS` changes it).
+static WAIT_MS: AtomicU64 = AtomicU64::new(500);
+
+fn wait() -> Duration {
+    Duration::from_millis(WAIT_MS.load(Ordering::Relaxed))
+}
 
 enum Stream {
     Tcp(TcpStream),
@@ -78,7 +89,7 @@ fn udp(src: Option<&str>, host: &str, port: &str, data: &[u8]) -> String {
         None => "0.0.0.0:0".into(),
     };
     let sock = UdpSocket::bind(bind).expect("bind");
-    sock.set_read_timeout(Some(WAIT)).unwrap();
+    sock.set_read_timeout(Some(wait())).unwrap();
     if let Err(e) = sock.send_to(data, dst) {
         return format!("send-failed {}", errno(&e));
     }
@@ -90,7 +101,7 @@ fn udp(src: Option<&str>, host: &str, port: &str, data: &[u8]) -> String {
 }
 
 fn recv(c: &mut Conn) -> String {
-    c.set_timeout(WAIT);
+    c.set_timeout(wait());
     let mut got = std::mem::take(&mut c.pending);
     let mut buf = [0u8; 65536];
     loop {
@@ -123,6 +134,63 @@ fn recv(c: &mut Conn) -> String {
             }
             Err(e) => return format!("read-failed {}", errno(&e)),
         }
+    }
+}
+
+/// `ucall`: fork, become `uid`, connect, send, read one record; the child prints.
+fn ucall(uid: u32, rest: &[&str]) -> String {
+    let (path, data) = match rest {
+        ["unix", path, data] => (*path, *data),
+        _ => panic!("rpcprobe: bad ucall"),
+    };
+    let (r, w) = {
+        let mut fds = [0; 2];
+        // SAFETY: fds has room for two descriptors.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        (fds[0], fds[1])
+    };
+    // SAFETY: the child only switches ids, does its I/O and exits.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        // SAFETY: plain id changes in the child.
+        unsafe {
+            libc::close(r);
+            if libc::setgroups(0, std::ptr::null()) != 0 || libc::setgid(uid) != 0 || libc::setuid(uid) != 0 {
+                libc::_exit(3);
+            }
+        }
+        let out = match UnixStream::connect(path) {
+            Err(e) => format!("connect-failed {}", errno(&e)),
+            Ok(s) => {
+                let mut c = Conn::new(Stream::Unix(s));
+                match c.stream().write_all(&unhex(data)) {
+                    Err(e) => format!("send-failed {}", errno(&e)),
+                    Ok(()) => recv(&mut c),
+                }
+            }
+        };
+        // SAFETY: writing our buffer to the pipe, then exiting.
+        unsafe {
+            libc::write(w, out.as_ptr().cast(), out.len());
+            libc::_exit(0);
+        }
+    }
+    // SAFETY: closing our write end, reading the child's answer, reaping it.
+    unsafe {
+        libc::close(w);
+        let mut buf = vec![0u8; 1 << 20];
+        let mut got = Vec::new();
+        loop {
+            let n = libc::read(r, buf.as_mut_ptr().cast(), buf.len());
+            if n <= 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n as usize]);
+        }
+        libc::close(r);
+        let mut st = 0;
+        libc::waitpid(pid, &mut st, 0);
+        String::from_utf8_lossy(&got).to_string()
     }
 }
 
@@ -166,6 +234,20 @@ fn main() {
             ["close", name] => {
                 conns.remove(*name);
                 "closed".into()
+            }
+            ["ucall", uid, rest @ ..] => ucall(uid.parse().unwrap(), rest),
+            ["run", cmd, args @ ..] => {
+                let o = std::process::Command::new(cmd).args(args).output().expect("run");
+                let mut t = String::from_utf8_lossy(&o.stdout).trim_end().replace('\n', " / ");
+                let e = String::from_utf8_lossy(&o.stderr).trim_end().replace('\n', " / ");
+                if !e.is_empty() {
+                    t = format!("{t} [stderr: {e}]");
+                }
+                format!("{t} [{}]", o.status.code().map_or("signal".into(), |c| c.to_string()))
+            }
+            ["timeout", ms] => {
+                WAIT_MS.store(ms.parse().unwrap(), Ordering::Relaxed);
+                continue;
             }
             ["sleep", ms] => {
                 std::thread::sleep(Duration::from_millis(ms.parse().unwrap()));

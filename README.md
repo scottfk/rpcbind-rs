@@ -22,39 +22,37 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Phase 1 of 5 is merged (PR #2); phase 2, the protocol, is in progress (branch
-`phase2-protocol`). Phase 1 covers the RPC layer in `crates/tirpc` and rpcbind's
-startup, with `NULL` calls and every rejection the RPC layer makes. In `crates/tirpc`:
+Phases 1 and 2 of 5 are done: phase 1 is merged (PR #2) and phase 2, the protocol, is
+on branch `phase2-protocol` (PR pending). The port now serves every procedure C
+rpcbind does in this build.
 
-- `/etc/netconfig` (`getnetconfig.c`), with libtirpc's shared cache and its parsing
-  quirks;
-- universal and transport address conversions (`rpc_generic.c`);
-- XDR primitives and the memory stream (`xdr.c`, `xdr_mem.c`), making the same stream
-  calls in the same order as libtirpc;
-- the record-marking stream in its non-blocking server mode (`xdr_rec.c`), including
-  where reply fragments are split;
-- call decoding, reply encoding and server-side authentication (`rpc_callmsg.c`,
-  `rpc_prot.c`, `svc_auth.c`, `svc_auth_unix.c`);
-- the transports and dispatcher (`svc.c`, `svc_dg.c`, `svc_vc.c`, `svc_generic.c`):
-  callouts, poll slots, error replies, UDP with pktinfo replies, non-blocking
-  connections, idle-connection cleanup;
-- the `sys` module: libc calls for sockets, stdio, users, signals and syslog.
+Phase 1, the RPC layer in `crates/tirpc` and rpcbind's startup:
 
-In `crates/rpcbind`: `rpcbind.c` (options, the lock, transports from netconfig, the
-user switch, signals, the poll loop), `xlog.c`, `security.c`'s access check and `-l`
-logging, `rpcb_stat.c`'s counters, `check_bound.c`'s transport list, `network_init()`,
-and the v2/v3/v4 dispatchers for `NULL` and unknown procedures. The other procedures
-are phase 2 (the port logs "not ported yet" and doesn't reply).
+- `/etc/netconfig` (`getnetconfig.c`), address conversions (`rpc_generic.c`), XDR
+  (`xdr.c`, `xdr_mem.c`), the record stream in its non-blocking server mode
+  (`xdr_rec.c`), messages and authentication (`rpc_callmsg.c`, `rpc_prot.c`,
+  `svc_auth*.c`), and the transports and dispatcher (`svc.c`, `svc_dg.c`, `svc_vc.c`,
+  `svc_generic.c`);
+- `rpcbind.c`, `xlog.c`, `security.c`, `check_bound.c` and `network_init()`.
 
-The differential suite has 32 tests (61 cases, each run against both daemons): options,
-`-h`, startup failures, 20 netconfig variants, signals, rejections, authentication,
-UDP and stream framing, and many connections. All pass, and mutants that undo four of the
-reproduced quirks are each caught.
+Phase 2, the protocol:
 
-Next, in phase 2: the portmap v2 and rpcbind v3/v4 procedures (`pmap_svc.c`,
-`rpcb_svc.c`, `rpcb_svc_4.c`, `rpcb_svc_com.c`, the rest of `rpcb_stat.c`, `addrmerge()`),
-the access checks for `SET`/`UNSET`, and the XDR routines they use (`rpcb_prot.c`,
-`pmap_prot*.c`). Until then the port logs "not ported yet" for those procedures.
+- portmap v2 (`pmap_svc.c`): `SET`, `UNSET`, `GETPORT`, `DUMP`, `CALLIT`;
+- rpcbind v3 and v4 (`rpcb_svc.c`, `rpcb_svc_4.c`, `rpcb_svc_com.c`): `SET`, `UNSET`
+  with owners, `GETADDR`, `GETVERSADDR`, `GETADDRLIST`, `DUMP`, `GETTIME`,
+  `UADDR2TADDR`, `TADDR2UADDR`, `GETSTAT`, and `CALLIT`/`INDIRECT`/`BCAST` up to the
+  missing forwarding socket;
+- `addrmerge()` and `mergeaddr()`, all of `rpcb_stat.c`, and libtirpc's XDR for these
+  types (`rpcb_prot.c`, `rpcb_st_xdr.c`, `pmap_prot*.c`) in `tirpc::rpcb_prot`.
+
+The differential suite has 47 tests (80 cases), all passing: 32 from phase 1 and 15 for
+the protocol, which register and look up services over every transport, as root and as
+other users over the local socket, from non-loopback addresses on netkit interfaces,
+through the system libtirpc (`rpcb_set()`, `pmap_set()`, `rpcb_getaddr()`...) and C
+`rpcinfo`. Mutants that undo reproduced quirks are caught (four in phase 1, five in
+phase 2).
+
+Next: phase 3, hostile input.
 
 The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
 step lands.
@@ -114,8 +112,11 @@ case's own `/etc/netconfig` if it has one), sends both the same requests with
 To see what each case produced: `RPCBIND_DIFF_SHOW=1 cargo test -- --nocapture`. Each
 run's files stay in `target/difftest/<case>/{c,r}/`.
 
-Phase 2 adds C `rpcinfo` and a probe linked with the system libtirpc (`rpcb_set()`,
-`pmap_set()` and friends, as NFS daemons call them).
+The probe can also run commands in the sandbox: C `rpcinfo` and `tirpcprobe`
+([crates/rpcbind/tests/tirpcprobe.c](crates/rpcbind/tests/tirpcprobe.c)), which calls
+rpcbind through the system libtirpc as RPC services do, optionally as another user.
+Cases can add netkit interfaces, and a fixed clock for the daemon (the LD_PRELOAD shim
+in `crates/rpcbind/tests/shim/`) for `GETTIME`.
 
 ## Roadmap
 
@@ -126,7 +127,7 @@ Phase 2 adds C `rpcinfo` and a probe linked with the system libtirpc (`rpcb_set(
    the local socket and its mode), the privilege drop, signals, `daemon()` and the
    loop. Tested with `NULL` calls on every program and version, and the rejections
    (wrong program, version, procedure, RPC version, auth) for everything else.
-2. **The protocol (in progress, branch `phase2-protocol`):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
+2. **The protocol (done, branch `phase2-protocol`):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
    `SET`/`UNSET` with owners taken from local-socket credentials, `GETADDR` and
    `GETVERSADDR` with `addrmerge()` choosing the interface address, `DUMP`,
    `GETADDRLIST`, `GETTIME`, `UADDR2TADDR`/`TADDR2UADDR`, `GETSTAT` counters, and the

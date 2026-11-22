@@ -184,6 +184,18 @@ impl Request<'_> {
         reply(self.xprt, &verf, &mut ReplyBody::SystemErr);
     }
 
+    /// `svcerr_noprog()`.
+    pub fn svcerr_noprog(&mut self) {
+        let verf = self.xprt.verf.clone();
+        reply(self.xprt, &verf, &mut ReplyBody::ProgUnavail);
+    }
+
+    /// `svcerr_progvers()`.
+    pub fn svcerr_progvers(&mut self, low: u32, high: u32) {
+        let verf = self.xprt.verf.clone();
+        reply(self.xprt, &verf, &mut ReplyBody::ProgMismatch { low, high });
+    }
+
     /// `svcerr_weakauth()`.
     pub fn svcerr_weakauth(&mut self) {
         reply(self.xprt, &OpaqueAuth::default(), &mut ReplyBody::AuthError(AuthStat::TooWeak));
