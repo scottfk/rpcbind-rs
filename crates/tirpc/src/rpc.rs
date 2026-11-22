@@ -73,26 +73,34 @@ pub struct AuthUnix {
 }
 
 /// One `opaque_auth` body in `xdr_callmsg()` decoding: inline if the stream can, else
-/// `xdr_opaque()`. Both read `len` bytes and skip the padding.
-fn get_auth_body(x: &mut dyn XdrDecode, len: usize) -> Option<Vec<u8>> {
+/// `xdr_opaque()`. Both read `len` bytes into `dst` (the body's place in the
+/// [`CredArea`]) and skip the padding. On a failure the bytes already copied stay: a
+/// record stream copies what its record still holds before giving up.
+fn get_auth_body(x: &mut dyn XdrDecode, len: usize, dst: &mut [u8]) -> bool {
     if len == 0 {
-        return Some(Vec::new());
+        return true;
     }
     if len > MAX_AUTH_BYTES {
-        return None;
+        return false;
     }
     if let Some(b) = x.inline(rndup(len)) {
-        return Some(b[..len].to_vec());
+        dst[..len].copy_from_slice(&b[..len]);
+        return true;
     }
-    xdr::get_opaque(x, len)
+    if !x.get_bytes(&mut dst[..len]) {
+        return false;
+    }
+    let pad = rndup(len) - len;
+    pad == 0 || x.get_bytes(&mut [0u8; 3][..pad])
 }
 
 /// `xdr_callmsg()`, decoding. `None` (the call is dropped, or a stream connection
 /// closed) for a reply, an RPC version other than 2, an oversized credential or
-/// verifier, or a message cut short.
-pub fn decode_call(x: &mut dyn XdrDecode) -> Option<CallMsg> {
-    // The inline fast path and the xdr_* fallback accept and reject the same input;
-    // they differ only in where a failure is noticed, which isn't visible.
+/// verifier, or a message cut short. The credential and verifier bodies are read into
+/// `area` as they come, so even a call that fails to decode can leave bytes there.
+pub fn decode_call(x: &mut dyn XdrDecode, area: &mut CredArea) -> Option<CallMsg> {
+    // The inline fast path and the xdr_* fallback accept and reject the same input
+    // and copy the same bytes; they differ only in where a failure is noticed.
     let xid = x.get_long()?;
     if x.get_long()? != CALL {
         return None;
@@ -105,45 +113,69 @@ pub fn decode_call(x: &mut dyn XdrDecode) -> Option<CallMsg> {
     let proc_ = x.get_long()?;
     let cflavor = x.get_long()?;
     let clen = x.get_long()? as usize;
-    let cbody = get_auth_body(x, clen)?;
+    if !get_auth_body(x, clen, &mut area.area_mut()[..MAX_AUTH_BYTES]) {
+        return None;
+    }
     let vflavor = x.get_long()?;
     let vlen = x.get_long()? as usize;
-    let vbody = get_auth_body(x, vlen)?;
+    if !get_auth_body(x, vlen, &mut area.area_mut()[MAX_AUTH_BYTES..2 * MAX_AUTH_BYTES]) {
+        return None;
+    }
+    let a = area.area();
     Some(CallMsg {
         xid,
         prog,
         vers,
         proc_,
-        cred: OpaqueAuth { flavor: cflavor, body: cbody },
-        verf: OpaqueAuth { flavor: vflavor, body: vbody },
+        cred: OpaqueAuth { flavor: cflavor, body: a[..clen].to_vec() },
+        verf: OpaqueAuth { flavor: vflavor, body: a[MAX_AUTH_BYTES..MAX_AUTH_BYTES + vlen].to_vec() },
     })
 }
 
 /// `svc_getreq_common()`'s `cred_area` (credential at 0, verifier at
-/// `MAX_AUTH_BYTES`, cooked credential after). In C it's a local array that lands at the
-/// same stack address on every call, so bytes from earlier calls remain past a short
-/// credential; `_svcauth_unix()` reads them. Kept here across calls for the same effect.
+/// `MAX_AUTH_BYTES`, cooked credential after). In C it's a local array, so bytes from
+/// earlier calls remain past a short credential, and `_svcauth_unix()` reads them.
+///
+/// QUIRK: the array doesn't stay at one address. `my_svc_run()` copies the poll table
+/// into a variable-length array on its stack, sized to the table (8 bytes a slot,
+/// rounded up to 16) before each `poll()`, so when the table has grown, the calls of
+/// the next round find the area lower down, over different leftovers. Modeled as a
+/// stretch of stack holding the area at an offset set by the table's size. Bytes no
+/// call wrote there read as zero; in C they are whatever other frames left.
 #[derive(Debug)]
 pub struct CredArea {
-    area: Vec<u8>,
+    stack: Vec<u8>,
+    base: usize,
 }
+
+/// The area's size.
+const AREA: usize = 2 * MAX_AUTH_BYTES + RQCRED_SIZE;
+/// The largest poll array (`FD_SETSIZE` slots).
+const MAX_VLA: usize = 1024 * 8;
 
 impl Default for CredArea {
     fn default() -> Self {
-        CredArea { area: vec![0; 2 * MAX_AUTH_BYTES + RQCRED_SIZE] }
+        CredArea { stack: vec![0; MAX_VLA + AREA], base: MAX_VLA }
     }
 }
 
 impl CredArea {
-    /// What `xdr_callmsg()` copies into the area for this call.
-    pub fn load(&mut self, call: &CallMsg) {
-        self.area[..call.cred.body.len()].copy_from_slice(&call.cred.body);
-        let v = MAX_AUTH_BYTES;
-        self.area[v..v + call.verf.body.len()].copy_from_slice(&call.verf.body);
+    /// Place the area for a round whose poll array has `slots` entries.
+    pub fn set_poll_slots(&mut self, slots: usize) {
+        let vla = (slots * 8).div_ceil(16) * 16;
+        self.base = MAX_VLA - vla.min(MAX_VLA);
+    }
+
+    fn area(&self) -> &[u8] {
+        &self.stack[self.base..self.base + AREA]
+    }
+
+    fn area_mut(&mut self) -> &mut [u8] {
+        &mut self.stack[self.base..self.base + AREA]
     }
 
     fn u32_at(&self, off: usize) -> u32 {
-        u32::from_be_bytes(self.area[off..off + 4].try_into().unwrap())
+        u32::from_be_bytes(self.area()[off..off + 4].try_into().unwrap())
     }
 }
 
@@ -180,7 +212,7 @@ fn svcauth_unix(call: &CallMsg, area: &CredArea, stdout: &mut Vec<u8>) -> Result
     if str_len > MAX_MACHINE_NAME {
         return Err(AuthStat::BadCred);
     }
-    let machname = area.area[off..off + str_len].to_vec();
+    let machname = area.area()[off..off + str_len].to_vec();
     let str_len = rndup(str_len);
     off += str_len;
     let uid = area.u32_at(off);
@@ -296,23 +328,23 @@ mod tests {
 
     #[test]
     fn decodes_and_rejects() {
+        let mut area = CredArea::default();
         let mut b = call_bytes(2, (AUTH_NONE, b""), (AUTH_NONE, b""));
-        let c = decode_call(&mut XdrMem::new(&mut b)).unwrap();
+        let c = decode_call(&mut XdrMem::new(&mut b), &mut area).unwrap();
         assert_eq!((c.xid, c.prog, c.vers, c.proc_), (7, 100000, 2, 0));
         let mut b = call_bytes(3, (AUTH_NONE, b""), (AUTH_NONE, b""));
-        assert!(decode_call(&mut XdrMem::new(&mut b)).is_none());
+        assert!(decode_call(&mut XdrMem::new(&mut b), &mut area).is_none());
         let big = vec![0u8; 401];
         let mut b = call_bytes(2, (AUTH_SYS, &big), (AUTH_NONE, b""));
-        assert!(decode_call(&mut XdrMem::new(&mut b)).is_none());
+        assert!(decode_call(&mut XdrMem::new(&mut b), &mut area).is_none());
     }
 
     #[test]
     fn auth_sys() {
+        let mut area = CredArea::default();
         let cred = sys_cred(b"host", &[1, 2]);
         let mut b = call_bytes(2, (AUTH_SYS, &cred), (9, b"abcd"));
-        let c = decode_call(&mut XdrMem::new(&mut b)).unwrap();
-        let mut area = CredArea::default();
-        area.load(&c);
+        let c = decode_call(&mut XdrMem::new(&mut b), &mut area).unwrap();
         let mut out = Vec::new();
         let a = authenticate(&c, &area, &mut out).unwrap();
         assert_eq!(a.verf, OpaqueAuth { flavor: 9, body: b"abcd".to_vec() });
@@ -321,9 +353,16 @@ mod tests {
         // Cut short: the missing gid is read from what the area held before.
         let short = &cred[..cred.len() - 4];
         let mut b = call_bytes(2, (AUTH_SYS, short), (AUTH_NONE, b""));
-        let c = decode_call(&mut XdrMem::new(&mut b)).unwrap();
-        area.load(&c);
+        let c = decode_call(&mut XdrMem::new(&mut b), &mut area).unwrap();
         assert_eq!(authenticate(&c, &area, &mut out), Err(AuthStat::BadCred));
         assert_eq!(out, b"bad auth_len gid 2 str 4 auth 28\n");
+        // A call whose verifier is too long fails, but its credential was copied.
+        let mut b = call_bytes(2, (AUTH_SYS, &sys_cred(b"zzzz", &[5, 6, 7])), (0, &[0u8; 401]));
+        assert!(decode_call(&mut XdrMem::new(&mut b), &mut area).is_none());
+        let mut b = call_bytes(2, (AUTH_SYS, &cred[..20]), (AUTH_NONE, b""));
+        let c = decode_call(&mut XdrMem::new(&mut b), &mut area).unwrap();
+        out.clear();
+        assert_eq!(authenticate(&c, &area, &mut out), Err(AuthStat::BadCred));
+        assert_eq!(out, b"bad auth_len gid 3 str 4 auth 20\n");
     }
 }

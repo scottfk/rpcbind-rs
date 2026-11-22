@@ -118,7 +118,7 @@ pub struct Case {
     pub netconfig: Option<String>,
     /// Shell lines run before the daemon starts (as root, in the sandbox).
     pub setup: Vec<String>,
-    /// The probe script (see tests/probe/main.rs).
+    /// The probe script (see rpcprobe/main.rs).
     pub probe: Vec<String>,
     /// The signal that ends the daemon.
     pub signal: String,
@@ -126,6 +126,10 @@ pub struct Case {
     pub files: Vec<(String, Vec<u8>)>,
     /// A fixed clock for the daemon (seconds), through the faketime shim.
     pub faketime: Option<i64>,
+    /// The daemon's descriptor limit (`ulimit -n`), if not inherited.
+    pub nofile: Option<u32>,
+    /// Daemon stdout lines starting with this aren't compared.
+    pub drop_stdout: Option<String>,
 }
 
 impl Case {
@@ -139,6 +143,8 @@ impl Case {
             signal: "TERM".into(),
             files: Vec::new(),
             faketime: None,
+            nofile: None,
+            drop_stdout: None,
         }
     }
 
@@ -164,6 +170,16 @@ impl Case {
 
     pub fn faketime(mut self, secs: i64) -> Case {
         self.faketime = Some(secs);
+        self
+    }
+
+    pub fn drop_stdout(mut self, prefix: &str) -> Case {
+        self.drop_stdout = Some(prefix.to_string());
+        self
+    }
+
+    pub fn nofile(mut self, n: u32) -> Case {
+        self.nofile = Some(n);
         self
     }
 
@@ -354,7 +370,7 @@ ip link set lo up || exit 92
     s.push_str(&format!(
         r#"
 pids() {{ for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = rpcbind ] && echo ${{p#/proc/}}; done; }}
-{env}"$R/bin/rpcbind" {args} >"$R/out/stdout" 2>"$R/out/stderr" &
+({nofile}{env}exec "$R/bin/rpcbind" {args}) >"$R/out/stdout" 2>"$R/out/stderr" &
 DPID=$!
 # Ready: a daemon process asleep in poll(), or none left (it exited).
 i=0
@@ -368,7 +384,7 @@ while [ $i -lt 300 ]; do
   sleep 0.01; i=$((i+1))
 done
 [ $i -ge 300 ] && echo "not ready" >"$R/out/notready"
-"$R/bin/rpcprobe" <"$R/probe.in" >"$R/out/probe" 2>&1
+TEST_FAKETIME="$R/faketime" "$R/bin/rpcprobe" <"$R/probe.in" >"$R/out/probe" 2>&1
 sleep 0.05
 cat /proc/net/tcp /proc/net/tcp6 /proc/net/udp /proc/net/udp6 /proc/net/unix >"$R/out/sockets" 2>/dev/null
 ls -ln /run | tail -n +2 | awk '{{print $1, $3, $4, $5, $NF}}' >"$R/out/run_before"
@@ -395,6 +411,7 @@ exit 0
 "#,
         args = args.join(" "),
         sig = case.signal,
+        nofile = case.nofile.map_or(String::new(), |n| format!("ulimit -n {n} && ")),
         env = if case.faketime.is_some() { "LD_PRELOAD=\"$R/bin/faketime.so\" TEST_FAKETIME=\"$R/faketime\" " } else { "" }
     ));
     s
@@ -492,7 +509,7 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     link(&tirpcprobe_binary(), "bin/tirpcprobe");
     if let Some(secs) = case.faketime {
         link(&shim(), "bin/faketime.so");
-        std::fs::write(t.join("faketime"), format!("{secs} 0\n")).unwrap();
+        std::fs::write(t.join("faketime"), format!("{secs:020} 000000000\n")).unwrap();
     }
     if reference_rpcinfo().exists() {
         link(&reference_rpcinfo(), "bin/rpcinfo");
@@ -531,7 +548,13 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     let fix = |s: String| s.replace(root.to_str().unwrap(), "@T@");
     Outcome {
         status: read(&t, "out/status").trim().to_string(),
-        stdout: fix(read(&t, "out/stdout")),
+        stdout: {
+            let out = fix(read(&t, "out/stdout"));
+            match &case.drop_stdout {
+                Some(p) => out.split_inclusive('\n').filter(|l| !l.starts_with(p.as_str())).collect(),
+                None => out,
+            }
+        },
         stderr: fix(read(&t, "out/stderr")),
         syslog: syslog.into_iter().map(fix).collect(),
         probe: read(&t, "out/probe"),

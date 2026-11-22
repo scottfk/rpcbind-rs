@@ -22,9 +22,9 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Phases 1 and 2 of 5 are done: phase 1 is merged (PR #2) and phase 2, the protocol, is
-on branch `phase2-protocol` (PR #3). The port now serves every procedure C
-rpcbind does in this build.
+Phases 1 to 3 of 5 are done: phases 1 and 2 are merged (PRs #2 and #3) and phase 3,
+hostile input, is on branch `phase3-hostile` (PR #4). The port serves every procedure C
+rpcbind does in this build and holds up the same way under floods, stalls and garbage.
 
 Phase 1, the RPC layer in `crates/tirpc` and rpcbind's startup:
 
@@ -45,14 +45,24 @@ Phase 2, the protocol:
 - `addrmerge()` and `mergeaddr()`, all of `rpcb_stat.c`, and libtirpc's XDR for these
   types (`rpcb_prot.c`, `rpcb_st_xdr.c`, `pmap_prot*.c`) in `tirpc::rpcb_prot`.
 
-The differential suite has 47 tests (80 cases), all passing: 32 from phase 1 and 15 for
-the protocol, which register and look up services over every transport, as root and as
-other users over the local socket, from non-loopback addresses on netkit interfaces,
-through the system libtirpc (`rpcb_set()`, `pmap_set()`, `rpcb_getaddr()`...) and C
-`rpcinfo`. Mutants that undo reproduced quirks are caught (four in phase 1, five in
-phase 2).
+Phase 3, hostile input:
 
-Next: phase 3, hostile input.
+- connection floods under a low descriptor limit and the idle-connection cleanup
+  (`__svc_destroy_idle()` with its slot-index lookup), on a real and a fake clock;
+- half-sent records, half-closed and reset connections, and a client that never
+  reads its replies (`write_vc()`'s two-second stall);
+- the "rpcbomb" (CVE-2017-8779) and crafted `CALLIT` (CVE-2015-7236) cases, repeated,
+  with the daemon's resident peak checked (about 3 MB for both);
+- mutated calls of every procedure on every transport, 800 in the suite and 27,000
+  more run once over six option sets, all matching; they turned up the
+  `svc_freeargs()` failure for oversized netbufs and how libtirpc's leftover
+  credential bytes are left by failed decodes and move with the poll table.
+
+The differential suite has 57 tests (94 cases), all passing: 32 from phase 1, 15 for the
+protocol and 10 for hostile input. Mutants that undo reproduced quirks are caught (four
+in phase 1, five in phase 2, five in phase 3).
+
+Next: phase 4, rpcinfo.
 
 The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
 step lands.
@@ -101,7 +111,7 @@ case starts C rpcbind and then the port, each in a private user, mount, network 
 namespace (ids mapped from your subordinate ranges, so there's a real root and the
 system's users exist; its own loopback, `/proc` and `/run`; `/dev/log` captured; the
 case's own `/etc/netconfig` if it has one), sends both the same requests with
-`rpcprobe` (raw datagrams, connections and record fragments), and compares:
+`rpcprobe` ([crates/rpcbind/rpcprobe/](crates/rpcbind/rpcprobe/): raw datagrams, connections and record fragments), and compares:
 
 - every reply, byte for byte, and which address UDP replies came from;
 - stdout, stderr, the exit status and every syslog line (time stamps and pids
@@ -115,8 +125,11 @@ run's files stay in `target/difftest/<case>/{c,r}/`.
 The probe can also run commands in the sandbox: C `rpcinfo` and `tirpcprobe`
 ([crates/rpcbind/tests/tirpcprobe.c](crates/rpcbind/tests/tirpcprobe.c)), which calls
 rpcbind through the system libtirpc as RPC services do, optionally as another user.
-Cases can add netkit interfaces, and a fixed clock for the daemon (the LD_PRELOAD shim
-in `crates/rpcbind/tests/shim/`) for `GETTIME`.
+Cases can add netkit interfaces, a descriptor limit for the daemon, and a fake clock
+(the LD_PRELOAD shim in `crates/rpcbind/tests/shim/`) that the probe can move. In
+`sync on` mode the probe makes sure the daemon has handled everything sent before it
+reports a missing reply, so cases don't depend on timing. `RPCBIND_FUZZ=SEED:COUNT`
+adds a longer run of mutated calls (see `crates/rpcbind/tests/diff_hostile.rs`).
 
 ## Roadmap
 
@@ -133,7 +146,7 @@ in `crates/rpcbind/tests/shim/`) for `GETTIME`.
    `GETADDRLIST`, `GETTIME`, `UADDR2TADDR`/`TADDR2UADDR`, `GETSTAT` counters, and the
    access checks and `-i`/`-l` logging (`security.c`). Tested with C `rpcinfo`, the
    libtirpc probe and several interfaces in the test namespace.
-3. **Hostile input (planned):** malformed and truncated XDR, oversized and fragmented records,
+3. **Hostile input (done, PR #4):** malformed and truncated XDR, oversized and fragmented records,
    idle and half-open connections, many clients at once, and the cases behind past
    CVEs (CVE-2017-8779 "rpcbomb" and CVE-2015-7236), checked for the same replies and
    bounded memory.

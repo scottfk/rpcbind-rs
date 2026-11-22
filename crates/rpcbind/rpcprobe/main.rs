@@ -16,6 +16,19 @@
 //! - `run CMD ARGS...` - run a program (`@T@/bin/tirpcprobe ...`), print its output.
 //! - `timeout MS` - wait this long for replies from now on (default 500)
 //! - `sleep MS`
+//! - `shutw NAME` - shut down the writing side; prints `shut`.
+//! - `reset NAME` - close with a reset (`SO_LINGER` 0); prints `reset`.
+//! - `drain NAME` - read and discard until EOF, an error or silence; prints `eof`,
+//!   `read-failed ERRNO` or `open`.
+//! - `udpn COUNT HOST PORT HEX` - send the datagram COUNT times from one socket, each
+//!   after the last one's reply or silence; prints `replies N last HEX`.
+//! - `sync on`/`sync off` - from now on, before reporting `noreply`, `nodata` or `partial`, make
+//!   sure the daemon has handled everything sent so far, with a call on a new local
+//!   connection: the daemon accepts it in a poll round that saw everything sent
+//!   before as ready, and answers it in a later one. Then look once more.
+//! - `clock SECS` - set the daemon's fake clock (`$TEST_FAKETIME`).
+//! - `mem KB` - the daemon's peak resident size (`VmHWM`): prints `mem ok` if under KB,
+//!   else `mem over SIZE`.
 //!
 //! Every line printed starts with the command's line number, so output stays aligned.
 
@@ -25,10 +38,33 @@ use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// How long to wait for a reply (`timeout MS` changes it).
 static WAIT_MS: AtomicU64 = AtomicU64::new(500);
+/// `sync on`.
+static SYNC: AtomicBool = AtomicBool::new(false);
+
+/// Wait until the daemon has handled everything sent before (see `sync on`).
+fn sync() -> bool {
+    if !SYNC.load(Ordering::Relaxed) {
+        return false;
+    }
+    // A call for a version that isn't registered: answered without being counted, and
+    // on its own connection, so no transport's buffers change.
+    let mut m = Vec::new();
+    for w in [0x5359_4e43u32, 0, 2, 100000, 99, 0, 0, 0, 0, 0] {
+        m.extend_from_slice(&u32::to_be_bytes(w));
+    }
+    let mut rec = (0x8000_0000u32 | m.len() as u32).to_be_bytes().to_vec();
+    rec.extend_from_slice(&m);
+    let mut s = UnixStream::connect("/run/rpcbind.sock").expect("sync connect");
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.write_all(&rec).expect("sync send");
+    let mut buf = [0u8; 64];
+    assert!(s.read(&mut buf).expect("sync: no answer") > 0, "sync: closed");
+    true
+}
 
 fn wait() -> Duration {
     Duration::from_millis(WAIT_MS.load(Ordering::Relaxed))
@@ -94,14 +130,77 @@ fn udp(src: Option<&str>, host: &str, port: &str, data: &[u8]) -> String {
         return format!("send-failed {}", errno(&e));
     }
     let mut buf = vec![0u8; 65536];
-    match sock.recv_from(&mut buf) {
+    let mut r = sock.recv_from(&mut buf);
+    if r.is_err() && sync() {
+        sock.set_nonblocking(true).unwrap();
+        r = sock.recv_from(&mut buf);
+    }
+    match r {
         Ok((n, from)) => format!("reply {} from {}", hex(&buf[..n]), from.ip()),
         Err(_) => "noreply".into(),
     }
 }
 
+/// `udpn`: the same datagram many times, one at a time.
+fn udpn(count: usize, host: &str, port: &str, data: &[u8]) -> String {
+    let dst: SocketAddr = format!("{}:{port}", if host.contains(':') { format!("[{host}]") } else { host.into() })
+        .parse()
+        .expect("address");
+    let sock = UdpSocket::bind(if dst.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" }).expect("bind");
+    sock.set_read_timeout(Some(wait())).unwrap();
+    let mut buf = vec![0u8; 65536];
+    let (mut replies, mut last) = (0, String::new());
+    for _ in 0..count {
+        if let Err(e) = sock.send_to(data, dst) {
+            return format!("send-failed {}", errno(&e));
+        }
+        let mut r = sock.recv_from(&mut buf);
+        if r.is_err() && sync() {
+            sock.set_nonblocking(true).unwrap();
+            r = sock.recv_from(&mut buf);
+            sock.set_nonblocking(false).unwrap();
+        }
+        if let Ok((n, _)) = r {
+            replies += 1;
+            last = hex(&buf[..n]);
+        }
+    }
+    format!("replies {replies} last {last}")
+}
+
+/// `drain`: read until the daemon closes the connection.
+fn drain(c: &mut Conn) -> String {
+    c.set_timeout(wait());
+    c.pending.clear();
+    let mut buf = [0u8; 65536];
+    loop {
+        match c.stream().read(&mut buf) {
+            Ok(0) => return "eof".into(),
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => return "open".into(),
+            Err(e) => return format!("read-failed {}", errno(&e)),
+        }
+    }
+}
+
+/// `mem`: the largest `VmHWM` of the processes named rpcbind.
+fn mem(limit_kb: u64) -> String {
+    let mut peak = 0;
+    for e in std::fs::read_dir("/proc").expect("/proc").flatten() {
+        let d = e.path();
+        if std::fs::read_to_string(d.join("comm")).is_ok_and(|c| c.trim_end() == "rpcbind")
+            && let Ok(st) = std::fs::read_to_string(d.join("status"))
+            && let Some(l) = st.lines().find(|l| l.starts_with("VmHWM:"))
+        {
+            peak = peak.max(l.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0));
+        }
+    }
+    if peak < limit_kb { "mem ok".into() } else { format!("mem over {peak} kB") }
+}
+
 fn recv(c: &mut Conn) -> String {
     c.set_timeout(wait());
+    let mut synced = false;
     let mut got = std::mem::take(&mut c.pending);
     let mut buf = [0u8; 65536];
     loop {
@@ -130,6 +229,11 @@ fn recv(c: &mut Conn) -> String {
             }
             Ok(n) => got.extend_from_slice(&buf[..n]),
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                if !synced && sync() {
+                    synced = true;
+                    c.set_timeout(Duration::from_millis(1));
+                    continue;
+                }
                 return if got.is_empty() { "nodata".into() } else { format!("partial {}", hex(&got)) };
             }
             Err(e) => return format!("read-failed {}", errno(&e)),
@@ -245,10 +349,55 @@ fn main() {
                 }
                 format!("{t} [{}]", o.status.code().map_or("signal".into(), |c| c.to_string()))
             }
+            ["sync", on @ ("on" | "off")] => {
+                SYNC.store(*on == "on", Ordering::Relaxed);
+                continue;
+            }
             ["timeout", ms] => {
                 WAIT_MS.store(ms.parse().unwrap(), Ordering::Relaxed);
                 continue;
             }
+            ["shutw", name] => match conns.get(*name).map(|c| &c.s) {
+                Some(Stream::Tcp(s)) => {
+                    s.shutdown(std::net::Shutdown::Write).unwrap();
+                    "shut".into()
+                }
+                Some(Stream::Unix(s)) => {
+                    s.shutdown(std::net::Shutdown::Write).unwrap();
+                    "shut".into()
+                }
+                None => "no-such-connection".into(),
+            },
+            ["reset", name] => {
+                if let Some(Conn { s: Stream::Tcp(s), .. }) = conns.get(*name) {
+                    let l = libc::linger { l_onoff: 1, l_linger: 0 };
+                    // SAFETY: setting SO_LINGER on our own socket from a valid struct.
+                    unsafe {
+                        libc::setsockopt(
+                            std::os::fd::AsRawFd::as_raw_fd(s),
+                            libc::SOL_SOCKET,
+                            libc::SO_LINGER,
+                            (&raw const l).cast(),
+                            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+                        );
+                    }
+                }
+                conns.remove(*name);
+                "reset".into()
+            }
+            ["drain", name] => match conns.get_mut(*name) {
+                Some(c) => drain(c),
+                None => "no-such-connection".into(),
+            },
+            ["udpn", count, host, port, data] => udpn(count.parse().unwrap(), host, port, &unhex(data)),
+            ["clock", secs] => {
+                // In place, at a fixed width: the shim has the file mapped.
+                let f = std::env::var("TEST_FAKETIME").expect("TEST_FAKETIME");
+                let mut fh = std::fs::OpenOptions::new().write(true).open(f).unwrap();
+                fh.write_all(format!("{:020} 000000000\n", secs.parse::<i64>().unwrap()).as_bytes()).unwrap();
+                continue;
+            }
+            ["mem", kb] => mem(kb.parse().unwrap()),
             ["sleep", ms] => {
                 std::thread::sleep(Duration::from_millis(ms.parse().unwrap()));
                 continue;
