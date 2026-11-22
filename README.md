@@ -22,9 +22,9 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Phase 1 of 5 is done (branch `phase1-startup`, PR #2): the RPC layer in
-`crates/tirpc` and rpcbind's startup, with `NULL` calls and every rejection the RPC layer
-makes. In `crates/tirpc`:
+Phase 1 of 5 is merged (PR #2); phase 2, the protocol, is in progress (branch
+`phase2-protocol`). Phase 1 covers the RPC layer in `crates/tirpc` and rpcbind's
+startup, with `NULL` calls and every rejection the RPC layer makes. In `crates/tirpc`:
 
 - `/etc/netconfig` (`getnetconfig.c`), with libtirpc's shared cache and its parsing
   quirks;
@@ -51,7 +51,10 @@ The differential suite has 32 tests (61 cases, each run against both daemons): o
 UDP and stream framing, and many connections. All pass, and mutants that undo four of the
 reproduced quirks are each caught.
 
-Next: phase 2, the protocol.
+Next, in phase 2: the portmap v2 and rpcbind v3/v4 procedures (`pmap_svc.c`,
+`rpcb_svc.c`, `rpcb_svc_4.c`, `rpcb_svc_com.c`, the rest of `rpcb_stat.c`, `addrmerge()`),
+the access checks for `SET`/`UNSET`, and the XDR routines they use (`rpcb_prot.c`,
+`pmap_prot*.c`). Until then the port logs "not ported yet" for those procedures.
 
 The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
 step lands.
@@ -116,14 +119,14 @@ Phase 2 adds C `rpcinfo` and a probe linked with the system libtirpc (`rpcb_set(
 
 ## Roadmap
 
-1. **Startup and the RPC layer (done, PR #2):** `crates/tirpc` (XDR, messages, auth, record marking,
+1. **Startup and the RPC layer (merged, PR #2):** `crates/tirpc` (XDR, messages, auth, record marking,
    the three transports, netconfig, universal addresses, the dispatcher with its error
    replies), and `rpcbind.c`: options, `-v`, the lock, the rlimit and superuser checks,
    one transport per netconfig entry (`-h` addresses, `SO_REUSEADDR`, `IPV6_V6ONLY`,
    the local socket and its mode), the privilege drop, signals, `daemon()` and the
    loop. Tested with `NULL` calls on every program and version, and the rejections
    (wrong program, version, procedure, RPC version, auth) for everything else.
-2. **The protocol (planned):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
+2. **The protocol (in progress, branch `phase2-protocol`):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
    `SET`/`UNSET` with owners taken from local-socket credentials, `GETADDR` and
    `GETVERSADDR` with `addrmerge()` choosing the interface address, `DUMP`,
    `GETADDRLIST`, `GETTIME`, `UADDR2TADDR`/`TADDR2UADDR`, `GETSTAT` counters, and the
