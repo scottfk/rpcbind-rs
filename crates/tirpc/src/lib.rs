@@ -6,6 +6,7 @@
 pub mod addr;
 pub mod netconfig;
 pub mod rpc;
+pub mod rpcb_prot;
 pub mod svc;
 pub mod sys;
 pub mod xdr;

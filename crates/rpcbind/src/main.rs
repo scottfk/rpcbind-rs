@@ -9,6 +9,7 @@ mod pmap_svc;
 mod rpcb_stat;
 mod rpcb_svc;
 mod rpcb_svc_4;
+mod rpcb_svc_com;
 mod security;
 mod util;
 mod xlog;
@@ -17,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use tirpc::addr::{self, Netbuf};
 use tirpc::netconfig::{NC_TPI_CLTS, NC_TPI_COTS, NC_TPI_COTS_ORD, NC_VISIBLE, Netconfig, NetconfigDb};
+use tirpc::rpcb_prot::{Pmap, Rpcb};
 use tirpc::svc::{self, RPC_MAXDATASIZE, Request, Service, Svc};
 use tirpc::sys;
 
@@ -52,25 +54,6 @@ const DISPATCH_RPCB_4: u32 = 4;
 static LOCKFD: AtomicI32 = AtomicI32::new(-1);
 static CREATEDSOCKET: AtomicBool = AtomicBool::new(false);
 
-/// `struct pmap` (`list_pml` entries).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pmap {
-    pub prog: u32,
-    pub vers: u32,
-    pub prot: u32,
-    pub port: u32,
-}
-
-/// `struct rpcb` (`list_rbl` entries).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rpcb {
-    pub prog: u32,
-    pub vers: u32,
-    pub netid: Vec<u8>,
-    pub addr: Vec<u8>,
-    pub owner: Vec<u8>,
-}
-
 /// rpcbind's globals.
 #[derive(Debug, Default)]
 pub struct Rpcbind {
@@ -104,12 +87,6 @@ impl Service for Rpcbind {
             _ => unreachable!(),
         }
     }
-}
-
-/// A procedure that phase 1 doesn't handle yet: no reply.
-pub fn not_ported(rb: &mut Rpcbind, req: &mut Request<'_>) {
-    let msg = format!("procedure {} of version {} not ported yet", req.call.proc_, req.call.vers);
-    rb.xlog.xlog(xlog::L_WARNING, msg.as_bytes());
 }
 
 /// `err(1, "%s", what)`.

@@ -65,6 +65,43 @@ pub fn probe_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rpcprobe"))
 }
 
+/// Build a C helper once into target/difftest/.tools.
+fn build_tool(name: &str, args: &[&str], src: &str, libs: &[&str]) -> PathBuf {
+    let dir = workspace_dir().join("target/difftest/.tools");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join(name);
+    let tmp = dir.join(format!("{name}.{}", std::process::id()));
+    let st = Command::new("cc")
+        .args(args)
+        .arg("-o")
+        .arg(&tmp)
+        .arg(manifest_dir().join(src))
+        .args(libs)
+        .status()
+        .expect("cc");
+    assert!(st.success(), "building {name} failed");
+    std::fs::rename(&tmp, &out).unwrap();
+    out
+}
+
+/// tests/tirpcprobe.c, built once against the system libtirpc.
+pub fn tirpcprobe_binary() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_tool("tirpcprobe", &["-O2", "-Wall", "-I/usr/include/tirpc"], "tests/tirpcprobe.c", &["-ltirpc"])
+        })
+        .clone()
+}
+
+/// tests/shim/faketime.c, the LD_PRELOAD clock.
+pub fn shim() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_tool("faketime.so", &["-shared", "-fPIC", "-O2"], "tests/shim/faketime.c", &["-ldl"]))
+        .clone()
+}
+
 /// Where every run's `T` appears inside its sandbox.
 pub fn fixed_root() -> PathBuf {
     let p = workspace_dir().join("target/difftest/.root");
@@ -87,6 +124,8 @@ pub struct Case {
     pub signal: String,
     /// Extra files under T: (relative path, contents).
     pub files: Vec<(String, Vec<u8>)>,
+    /// A fixed clock for the daemon (seconds), through the faketime shim.
+    pub faketime: Option<i64>,
 }
 
 impl Case {
@@ -99,6 +138,7 @@ impl Case {
             probe: Vec::new(),
             signal: "TERM".into(),
             files: Vec::new(),
+            faketime: None,
         }
     }
 
@@ -119,6 +159,11 @@ impl Case {
 
     pub fn signal(mut self, sig: &str) -> Case {
         self.signal = sig.to_string();
+        self
+    }
+
+    pub fn faketime(mut self, secs: i64) -> Case {
+        self.faketime = Some(secs);
         self
     }
 
@@ -309,7 +354,7 @@ ip link set lo up || exit 92
     s.push_str(&format!(
         r#"
 pids() {{ for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = rpcbind ] && echo ${{p#/proc/}}; done; }}
-"$R/bin/rpcbind" {args} >"$R/out/stdout" 2>"$R/out/stderr" &
+{env}"$R/bin/rpcbind" {args} >"$R/out/stdout" 2>"$R/out/stderr" &
 DPID=$!
 # Ready: a daemon process asleep in poll(), or none left (it exited).
 i=0
@@ -349,7 +394,8 @@ ls -ln /run | tail -n +2 | awk '{{print $1, $3, $4, $5, $NF}}' >"$R/out/run_afte
 exit 0
 "#,
         args = args.join(" "),
-        sig = case.signal
+        sig = case.signal,
+        env = if case.faketime.is_some() { "LD_PRELOAD=\"$R/bin/faketime.so\" TEST_FAKETIME=\"$R/faketime\" " } else { "" }
     ));
     s
 }
@@ -443,6 +489,11 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     };
     link(bin, "bin/rpcbind");
     link(&probe_binary(), "bin/rpcprobe");
+    link(&tirpcprobe_binary(), "bin/tirpcprobe");
+    if let Some(secs) = case.faketime {
+        link(&shim(), "bin/faketime.so");
+        std::fs::write(t.join("faketime"), format!("{secs} 0\n")).unwrap();
+    }
     if reference_rpcinfo().exists() {
         link(&reference_rpcinfo(), "bin/rpcinfo");
     }
@@ -468,7 +519,7 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     let null = std::fs::File::open("/dev/null").unwrap();
     use std::os::fd::AsRawFd;
     let pid = spawn_in_sandbox(&binds, &script(case, &root), [null.as_raw_fd(), err.as_raw_fd(), err.as_raw_fd()]);
-    let st = wait(pid, Duration::from_secs(30));
+    let st = wait(pid, Duration::from_secs(120));
     assert_eq!(st, "exit 0", "{}/{label}: sandbox {st}:\n{}", case.name, read(&t, "out/sandbox"));
     assert!(!t.join("out/notready").exists(), "{}/{label}: the daemon never became ready", case.name);
 

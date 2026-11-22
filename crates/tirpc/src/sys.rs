@@ -681,3 +681,33 @@ pub fn raise(sig: i32) -> i32 {
     // SAFETY: no memory arguments.
     unsafe { libc::raise(sig) }
 }
+
+/// The peer's effective uid on a local socket (`getpeereid()`, which libtirpc builds on
+/// `SO_PEERCRED`).
+pub fn peer_uid(fd: Fd) -> Option<u32> {
+    let mut c = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: c and len are valid; len gives c's size.
+    let r = unsafe {
+        libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut c as *mut libc::ucred).cast(), &mut len)
+    };
+    if r == 0 { Some(c.uid) } else { None }
+}
+
+/// Whether `malloc(n)` would succeed now: C code allocates a decoded length before
+/// reading the bytes, so a huge length fails (or not) at the allocation.
+pub fn malloc_ok(n: usize) -> bool {
+    // SAFETY: the block is freed at once and never touched.
+    unsafe {
+        let p = libc::malloc(n.max(1));
+        let ok = !p.is_null();
+        libc::free(p);
+        ok
+    }
+}
+
+/// `time(NULL)`.
+pub fn time() -> i64 {
+    // SAFETY: a null pointer is allowed.
+    unsafe { libc::time(std::ptr::null_mut()) }
+}

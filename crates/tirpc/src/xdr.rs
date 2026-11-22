@@ -59,13 +59,35 @@ pub fn put_bool(x: &mut dyn XdrEncode, v: bool) -> bool {
 }
 
 /// `xdr_opaque()` decoding: `cnt` bytes, then the padding (read and ignored).
+///
+/// A length from the wire can be up to 4 GB, so the bytes are read in pieces and the
+/// buffer grows only as they arrive: a short stream fails long before a large
+/// allocation.
 pub fn get_opaque(x: &mut dyn XdrDecode, cnt: usize) -> Option<Vec<u8>> {
     if cnt == 0 {
         return Some(Vec::new());
     }
-    let mut v = vec![0u8; cnt];
-    if !x.get_bytes(&mut v) {
-        return None;
+    const CHUNK: usize = 64 * 1024;
+    let mut v = Vec::new();
+    if cnt <= CHUNK {
+        v.resize(cnt, 0);
+        if !x.get_bytes(&mut v) {
+            return None;
+        }
+    } else {
+        // Both streams fail a getbytes they can't satisfy whole; in pieces, a stream
+        // that runs out fails on the piece that crosses its end. Either way decoding
+        // stops there.
+        let mut chunk = vec![0u8; CHUNK];
+        let mut left = cnt;
+        while left > 0 {
+            let n = left.min(CHUNK);
+            if !x.get_bytes(&mut chunk[..n]) {
+                return None;
+            }
+            v.extend_from_slice(&chunk[..n]);
+            left -= n;
+        }
     }
     let pad = rndup(cnt) - cnt;
     if pad == 0 {
@@ -88,9 +110,18 @@ pub fn put_opaque(x: &mut dyn XdrEncode, b: &[u8]) -> bool {
 }
 
 /// `xdr_bytes()` decoding: a length (at most `maxsize`), then the opaque bytes.
+///
+/// C allocates the length before reading anything; if that fails it prints
+/// `xdr_bytes: out of memory` (through `warnx()`) and fails.
 pub fn get_bytes(x: &mut dyn XdrDecode, maxsize: u32) -> Option<Vec<u8>> {
     let size = x.get_long()?;
     if size > maxsize {
+        return None;
+    }
+    if size != 0 && !crate::sys::malloc_ok(size as usize) {
+        let mut m = crate::sys::progname();
+        m.extend_from_slice(b": xdr_bytes: out of memory\n");
+        crate::sys::c_stderr(&m);
         return None;
     }
     get_opaque(x, size as usize)
