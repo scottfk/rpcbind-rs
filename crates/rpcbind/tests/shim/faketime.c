@@ -7,11 +7,13 @@
  * 20261111 - Virtual alarm() for anacron - Claude - scottfk
  * 20261115 - Copied from cronie-rs for the logrotate-rs tests - Claude - scottfk
  * 20261122 - Copied from logrotate-rs for the rpcbind-rs tests - Claude - scottfk
+ * 20261122 - Map the file once, so reading the clock needs no descriptor - Claude - scottfk
  *
  * If $TEST_FAKETIME names a readable file holding "SECONDS NANOSECONDS",
  * time(), gettimeofday() and clock_gettime(CLOCK_REALTIME) return that
- * instant.  The file is re-read on every call, so a test steps the clock by
- * rewriting it.  Other clocks (CLOCK_MONOTONIC) pass
+ * instant.  The file is mapped at the first call and read through the mapping
+ * on every call, so a test steps the clock by rewriting it in place (not by
+ * replacing it), and a process out of descriptors still reads it.  Other clocks (CLOCK_MONOTONIC) pass
  * through.  Both the C reference and the Rust port call these through the PLT,
  * so one shim controls both.  errno is preserved: the C code prints
  * it after unrelated calls.
@@ -37,31 +39,47 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 static int fake(struct timespec *ts)
 {
+    static const char *map;
+    static int mapped;  /* 1 mapped, -1 not possible */
     const char *f = getenv("TEST_FAKETIME");
     char buf[64];
     long long s = 0, ns = 0;
-    int fd, n, saved = errno, i = 0, neg = 0;
+    int saved = errno, i = 0, neg = 0;
 
-    if (!f || (fd = open(f, O_RDONLY | O_CLOEXEC)) < 0) {
+    if (!f)
+        return 0;
+    if (!mapped) {
+        int fd = open(f, O_RDONLY | O_CLOEXEC);
+
+        mapped = -1;
+        if (fd >= 0) {
+            void *p = mmap(NULL, sizeof buf, PROT_READ, MAP_SHARED, fd, 0);
+
+            close(fd);
+            if (p != MAP_FAILED) {
+                map = p;
+                mapped = 1;
+            }
+        }
         errno = saved;
-        return 0;
     }
-    n = (int) read(fd, buf, sizeof buf - 1);
-    close(fd);
-    errno = saved;
-    if (n <= 0)
+    if (mapped < 0)
         return 0;
-    buf[n] = 0;
+    memcpy(buf, map, sizeof buf - 1);
+    buf[sizeof buf - 1] = 0;
     /* No stdio here: the Rust port emulates stdio buffering, and the C
      * reference's FILE list should look the same with or without us. */
     if (buf[i] == '-') {
         neg = 1;
         i++;
     }
+    if (buf[i] < '0' || buf[i] > '9')
+        return 0;
     while (buf[i] >= '0' && buf[i] <= '9')
         s = s * 10 + (buf[i++] - '0');
     while (buf[i] == ' ')
@@ -186,7 +204,7 @@ static void advance(unsigned int secs, int *stopping)
     const char *f = getenv("TEST_FAKETIME");
     const char *stop = getenv("TEST_STOP");
     struct timespec ts, nap = { 0, 2000000 };
-    char buf[64], tmp[4096];
+    char buf[64];
     int fd, saved = errno, n;
 
     while (!children_done())
@@ -197,12 +215,11 @@ static void advance(unsigned int secs, int *stopping)
     *stopping = stop && ts.tv_sec >= atoll(stop);
     if (*stopping)
         ts.tv_sec = atoll(stop);
-    n = snprintf(buf, sizeof buf, "%lld %ld\n", (long long) ts.tv_sec, (long) ts.tv_nsec);
-    snprintf(tmp, sizeof tmp, "%s.tmp", f);
-    if ((fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)) >= 0) {
-        if (write(fd, buf, (size_t) n) < 0) { /* the clock just stays */ }
+    /* In place and at a fixed width: readers have the file mapped. */
+    n = snprintf(buf, sizeof buf, "%020lld %09ld\n", (long long) ts.tv_sec, (long) ts.tv_nsec);
+    if ((fd = open(f, O_WRONLY | O_CLOEXEC)) >= 0) {
+        if (pwrite(fd, buf, (size_t) n, 0) < 0) { /* the clock just stays */ }
         close(fd);
-        rename(tmp, f);
     }
     errno = saved;
 }

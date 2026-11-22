@@ -86,14 +86,23 @@ pub struct WireNetbuf {
     pub buf: Vec<u8>,
 }
 
-/// `xdr_netbuf()` decoding.
-pub fn get_netbuf(x: &mut dyn XdrDecode) -> Option<WireNetbuf> {
-    let maxlen = x.get_long()?;
-    if maxlen > RPC_MAXDATASIZE {
+/// `xdr_netbuf()` decoding. `maxlen` is the struct's field, which keeps what was read
+/// when decoding fails: see [`netbuf_frees`].
+pub fn get_netbuf(x: &mut dyn XdrDecode, maxlen: &mut u32) -> Option<WireNetbuf> {
+    *maxlen = x.get_long()?;
+    if *maxlen > RPC_MAXDATASIZE {
         return None;
     }
-    let buf = xdr::get_bytes(x, maxlen)?;
-    Some(WireNetbuf { maxlen, buf })
+    let buf = xdr::get_bytes(x, *maxlen)?;
+    Some(WireNetbuf { maxlen: *maxlen, buf })
+}
+
+/// Whether `xdr_netbuf()` with `XDR_FREE` succeeds on a netbuf whose `maxlen` field
+/// holds this. QUIRK: it checks the limit before freeing, so a netbuf that failed to
+/// decode for a `maxlen` over `RPC_MAXDATASIZE` can't be freed (`svc_freeargs()`
+/// fails).
+pub fn netbuf_frees(maxlen: u32) -> bool {
+    maxlen <= RPC_MAXDATASIZE
 }
 
 /// `xdr_netbuf()` encoding.

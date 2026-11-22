@@ -43,7 +43,8 @@ pub enum Res {
     Stat,
 }
 
-fn decode(t: ArgType, x: &mut dyn XdrDecode) -> Option<Args> {
+/// `maxlen` is the netbuf's field (zeroed before decoding, as `argument` is).
+fn decode(t: ArgType, x: &mut dyn XdrDecode, maxlen: &mut u32) -> Option<Args> {
     Some(match t {
         ArgType::Void => Args::Void,
         ArgType::Rpcb => Args::Rpcb(rpcb_prot::get_rpcb(x)?),
@@ -54,7 +55,7 @@ fn decode(t: ArgType, x: &mut dyn XdrDecode) -> Option<Args> {
             }
             Args::Str(s)
         }
-        ArgType::Netbuf => Args::Netbuf(rpcb_prot::get_netbuf(x)?),
+        ArgType::Netbuf => Args::Netbuf(rpcb_prot::get_netbuf(x, maxlen)?),
     })
 }
 
@@ -82,10 +83,18 @@ pub fn serve(
     nl: &str,
 ) {
     let proc_ = req.call.proc_;
-    let Some(args) = req.getargs(|x| decode(argt, x)) else {
+    let mut maxlen = 0;
+    let Some(args) = req.getargs(|x| decode(argt, x, &mut maxlen)) else {
         req.svcerr_decode();
         if rb.debugging > 0 {
             rb.xlog.xlog(LOG_DEBUG_KIND, format!("rpcbind: could not decode{nl}").as_bytes());
+        }
+        // svc_freeargs(): every other argument type frees cleanly, decoded or not.
+        if matches!(argt, ArgType::Netbuf) && !rpcb_prot::netbuf_frees(maxlen) && rb.debugging > 0 {
+            rb.xlog.xlog(LOG_DEBUG_KIND, format!("unable to free arguments{nl}").as_bytes());
+            if rb.doabort {
+                crate::rpcbind_abort();
+            }
         }
         return;
     };

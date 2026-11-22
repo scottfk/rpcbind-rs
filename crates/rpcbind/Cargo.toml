@@ -21,5 +21,5 @@ workspace = true
 # Test tool for the differential tests (not installed).
 [[bin]]
 name = "rpcprobe"
-path = "tests/probe/main.rs"
+path = "rpcprobe/main.rs"
 test = false

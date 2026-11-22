@@ -262,7 +262,9 @@ impl RecIo for ConnIo<'_> {
                     *self.strm_stat = XprtStat::Died;
                     return false;
                 }
-                // For non-blocking connections, don't take more than 2 seconds.
+                // For non-blocking connections, don't take more than 2 seconds. QUIRK:
+                // retried at once, not after a poll(): a client that doesn't read
+                // stalls the daemon for those 2 seconds.
                 if sys::gettimeofday().0 - tv0.0 >= 2 {
                     *self.strm_stat = XprtStat::Died;
                     return false;
@@ -551,6 +553,9 @@ impl Svc {
     /// `svc_getreq_poll()`: handle the ready descriptors in `pfds` (the copy that was
     /// polled), stopping after `pollretval` of them.
     pub fn getreq_poll(&mut self, svc: &mut dyn Service, pfds: &[libc::pollfd], pollretval: i32, stdout: &mut Vec<u8>) {
+        // The calls of this round find the credential area where this round's copy of
+        // the poll table puts it.
+        self.cred_area.set_poll_slots(pfds.len());
         let mut found = 0;
         let mut i = 0;
         // C loops to the current svc_max_pollfd, which can be past the copy after an
@@ -579,7 +584,6 @@ impl Svc {
         }
         loop {
             if let Recv::Call(call) = self.recv(fd) {
-                self.cred_area.load(&call);
                 let auth = rpc::authenticate(&call, &self.cred_area, stdout);
                 let mut xprt = self.xports[fd as usize].take().expect("registered");
                 match auth {
@@ -665,7 +669,7 @@ impl Svc {
                 x.rtaddr = Netbuf::from_bytes(&m.name[..m.namelen.min(m.name.len())]);
                 d.control = valid_pktinfo(&m);
                 let mut xd = XdrMem::new(&mut d.buf);
-                let call = rpc::decode_call(&mut xd);
+                let call = rpc::decode_call(&mut xd, &mut self.cred_area);
                 d.pos = xd.getpos();
                 d.handy = xd.handy();
                 match call {
@@ -684,7 +688,7 @@ impl Svc {
                 if !got {
                     return Recv::None;
                 }
-                match rpc::decode_call(&mut c.rec.decoder()) {
+                match rpc::decode_call(&mut c.rec.decoder(), &mut self.cred_area) {
                     Some(call) => {
                         c.x_id = call.xid;
                         Recv::Call(call)
@@ -754,9 +758,12 @@ impl Svc {
         let mut tmax = (0i64, 0i64);
         let mut least_active = None;
         // QUIRK: the loop runs over poll slots but looks transports up by slot index, as
-        // if it were a descriptor, and goes one slot past the end (treated here as free).
+        // if it were a descriptor, and goes one slot past the end. That slot's fd is
+        // heap bytes past the array (malloc's next chunk header, or slack), which are
+        // practically never -1, so it counts as in use: the transport whose descriptor
+        // is the table's size is checked too.
         for i in 0..=self.pollfd.len() {
-            if self.pollfd.get(i).is_none_or(|p| p.fd == -1) {
+            if self.pollfd.get(i).is_some_and(|p| p.fd == -1) {
                 continue;
             }
             let Some(Some(x)) = self.xports.get(i) else { continue };
