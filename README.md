@@ -22,7 +22,39 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Just started: project docs and the reference build.
+Phase 1 of 5 is done (branch `phase1-startup`, PR #2): the RPC layer in
+`crates/tirpc` and rpcbind's startup, with `NULL` calls and every rejection the RPC layer
+makes. In `crates/tirpc`:
+
+- `/etc/netconfig` (`getnetconfig.c`), with libtirpc's shared cache and its parsing
+  quirks;
+- universal and transport address conversions (`rpc_generic.c`);
+- XDR primitives and the memory stream (`xdr.c`, `xdr_mem.c`), making the same stream
+  calls in the same order as libtirpc;
+- the record-marking stream in its non-blocking server mode (`xdr_rec.c`), including
+  where reply fragments are split;
+- call decoding, reply encoding and server-side authentication (`rpc_callmsg.c`,
+  `rpc_prot.c`, `svc_auth.c`, `svc_auth_unix.c`);
+- the transports and dispatcher (`svc.c`, `svc_dg.c`, `svc_vc.c`, `svc_generic.c`):
+  callouts, poll slots, error replies, UDP with pktinfo replies, non-blocking
+  connections, idle-connection cleanup;
+- the `sys` module: libc calls for sockets, stdio, users, signals and syslog.
+
+In `crates/rpcbind`: `rpcbind.c` (options, the lock, transports from netconfig, the
+user switch, signals, the poll loop), `xlog.c`, `security.c`'s access check and `-l`
+logging, `rpcb_stat.c`'s counters, `check_bound.c`'s transport list, `network_init()`,
+and the v2/v3/v4 dispatchers for `NULL` and unknown procedures. The other procedures
+are phase 2 (the port logs "not ported yet" and doesn't reply).
+
+The differential suite has 32 tests (61 cases, each run against both daemons): options,
+`-h`, startup failures, 20 netconfig variants, signals, rejections, authentication,
+UDP and stream framing, and many connections. All pass, and mutants that undo four of the
+reproduced quirks are each caught.
+
+Next: phase 2, the protocol.
+
+The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
+step lands.
 
 The reference is the `rpcbind-1.2.8` release tarball, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)), against the system libtirpc
@@ -56,46 +88,54 @@ The port follows the files:
 | `contrib/gentoo/` | a `net-nds/rpcbind` live ebuild, and how to switch and roll back |
 | `tools/` | the reference build |
 
-## Testing (planned)
+## Testing
 
-`make check` will build the C reference into `../rpcbind` if it isn't there, then run
-the differential suite. Each case starts C rpcbind and the port in turn, in a private
-user, mount and network namespace (a real root, its own loopback and test interfaces,
-its own `/run` and `/etc`), sends both the same sequence of requests, and compares:
+```sh
+make check
+```
 
-- every reply, byte for byte (the transaction ids are the test's own);
-- stdout, stderr, the exit status and syslog lines (captured on the sandbox's
-  `/dev/log`);
-- the sockets each daemon left listening (family, type, address, owner, mode of
-  `/run/rpcbind.sock`) and the files under `/run`.
+This builds the C reference into `../rpcbind` if it isn't there, then runs the unit
+tests and the differential suite ([crates/rpcbind/tests/](crates/rpcbind/tests/)). Each
+case starts C rpcbind and then the port, each in a private user, mount, network and pid
+namespace (ids mapped from your subordinate ranges, so there's a real root and the
+system's users exist; its own loopback, `/proc` and `/run`; `/dev/log` captured; the
+case's own `/etc/netconfig` if it has one), sends both the same requests with
+`rpcprobe` (raw datagrams, connections and record fragments), and compares:
 
-Requests come from three clients: the C reference `rpcinfo`, a small C probe linked
-with the system libtirpc (`rpcb_set()`, `pmap_set()`, `rpcb_getaddr()` and friends, as
-NFS daemons call them, including over the local socket as other users), and raw packets
-written by the test, for malformed, truncated, oversized and hostile input.
+- every reply, byte for byte, and which address UDP replies came from;
+- stdout, stderr, the exit status and every syslog line (time stamps and pids
+  normalized);
+- the sockets the daemon has bound (unconnected UDP, listening TCP, the local socket)
+  and `/run` (names, modes, owners) before and after the signal that ends it.
+
+To see what each case produced: `RPCBIND_DIFF_SHOW=1 cargo test -- --nocapture`. Each
+run's files stay in `target/difftest/<case>/{c,r}/`.
+
+Phase 2 adds C `rpcinfo` and a probe linked with the system libtirpc (`rpcb_set()`,
+`pmap_set()` and friends, as NFS daemons call them).
 
 ## Roadmap
 
-1. **Startup and the RPC layer:** `crates/tirpc` (XDR, messages, auth, record marking,
+1. **Startup and the RPC layer (done, PR #2):** `crates/tirpc` (XDR, messages, auth, record marking,
    the three transports, netconfig, universal addresses, the dispatcher with its error
    replies), and `rpcbind.c`: options, `-v`, the lock, the rlimit and superuser checks,
    one transport per netconfig entry (`-h` addresses, `SO_REUSEADDR`, `IPV6_V6ONLY`,
    the local socket and its mode), the privilege drop, signals, `daemon()` and the
    loop. Tested with `NULL` calls on every program and version, and the rejections
    (wrong program, version, procedure, RPC version, auth) for everything else.
-2. **The protocol:** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
+2. **The protocol (planned):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
    `SET`/`UNSET` with owners taken from local-socket credentials, `GETADDR` and
    `GETVERSADDR` with `addrmerge()` choosing the interface address, `DUMP`,
    `GETADDRLIST`, `GETTIME`, `UADDR2TADDR`/`TADDR2UADDR`, `GETSTAT` counters, and the
    access checks and `-i`/`-l` logging (`security.c`). Tested with C `rpcinfo`, the
    libtirpc probe and several interfaces in the test namespace.
-3. **Hostile input:** malformed and truncated XDR, oversized and fragmented records,
+3. **Hostile input (planned):** malformed and truncated XDR, oversized and fragmented records,
    idle and half-open connections, many clients at once, and the cases behind past
    CVEs (CVE-2017-8779 "rpcbomb" and CVE-2015-7236), checked for the same replies and
    bounded memory.
-4. **rpcinfo:** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
+4. **rpcinfo (planned):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
    `-n`), run against both daemons.
-5. **Packaging:** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
+5. **Packaging (planned):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
    conf.d), rehearsed on the test VM with a real NFS client and server stack
    (`rpc.statd`, `rpc.mountd`, `nfsd`, a mount and file locks), and rolled back through a
    binary package of the C build.

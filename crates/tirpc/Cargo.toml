@@ -1,0 +1,14 @@
+[package]
+name = "tirpc"
+description = "The parts of libtirpc that rpcbind uses, in Rust: XDR, RPC messages, transports, netconfig"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true
