@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/tirpc", "crates/rpcbind"]
+members = ["crates/tirpc", "crates/rpcbind", "crates/rpcinfo"]
 
 [workspace.package]
 version = "0.1.0"

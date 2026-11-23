@@ -6,38 +6,6 @@ use common::*;
 const PMAP: u32 = 100000;
 const AUTH_SYS: u32 = 1;
 
-/// `struct rpcb` arguments.
-fn rpcb(prog: u32, vers: u32, netid: &str, addr: &str, owner: &str) -> String {
-    format!(
-        "{}{}{}{}",
-        words(&[prog, vers]),
-        opaque(netid.as_bytes()),
-        opaque(addr.as_bytes()),
-        opaque(owner.as_bytes())
-    )
-}
-
-/// `struct pmap` arguments.
-fn pmap(prog: u32, vers: u32, prot: u32, port: u32) -> String {
-    words(&[prog, vers, prot, port])
-}
-
-/// A probe command sending `msg` on a fresh connection to the local socket, then
-/// reading the reply.
-fn local(c: Case, name: &str, msg: &str) -> Case {
-    c.probe(format!("conn {name} unix /run/rpcbind.sock"))
-        .probe(format!("send {name} {}", record(msg)))
-        .probe(format!("recv {name}"))
-        .probe(format!("close {name}"))
-}
-
-fn tcp(c: Case, name: &str, host: &str, msg: &str) -> Case {
-    c.probe(format!("conn {name} tcp {host} 111"))
-        .probe(format!("send {name} {}", record(msg)))
-        .probe(format!("recv {name}"))
-        .probe(format!("close {name}"))
-}
-
 /// A send over UDP, TCP (v4 and v6) and the local socket.
 fn everywhere(mut c: Case, xid: u32, prog: u32, vers: u32, proc_: u32, args: &str) -> Case {
     let m = |x| call(x, prog, vers, proc_, args);
@@ -46,15 +14,6 @@ fn everywhere(mut c: Case, xid: u32, prog: u32, vers: u32, proc_: u32, args: &st
     c = tcp(c, &format!("t{xid}"), "127.0.0.1", &m(xid + 2));
     c = tcp(c, &format!("s{xid}"), "::1", &m(xid + 3));
     local(c, &format!("l{xid}"), &m(xid + 4))
-}
-
-/// Non-loopback interfaces: a netkit pair, with IPv4 and IPv6 addresses on both ends.
-fn interfaces(c: Case) -> Case {
-    c.setup("ip link add n0 type netkit peer name n1 || exit 93")
-        .setup("ip link set n0 up; ip link set n1 up")
-        .setup("ip addr add 192.168.50.1/24 dev n0; ip addr add 192.168.60.1/24 dev n1")
-        .setup("ip addr add fd00:50::1/64 dev n0 nodad; ip addr add fd00:60::1/64 dev n1 nodad")
-        .setup("ip addr add 10.9.0.1/16 dev lo")
 }
 
 /// Registrations made as root over the local socket.

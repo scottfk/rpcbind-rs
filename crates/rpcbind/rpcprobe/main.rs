@@ -30,6 +30,17 @@
 //! - `mem KB` - the daemon's peak resident size (`VmHWM`): prints `mem ok` if under KB,
 //!   else `mem over SIZE`.
 //!
+//! - `responder ADDR PORT UADDR PMAPPORT` - answer broadcast `CALLIT`s at ADDR:PORT
+//!   from a background thread: an rpcbind (v3/v4) call gets a success with the
+//!   universal address UADDR, a portmap (v2) one a success with port PMAPPORT; `-`
+//!   leaves that kind unanswered. Prints `responding` or `bind-failed ERRNO`.
+//!
+//! - `fakesrv udp|tcp ADDR PORT REPLY...` - a fake server in a background thread: each
+//!   call (a datagram, or a record on a connection) gets every REPLY in turn, a hex
+//!   message with `XID` standing for the call's xid, sent as a datagram or as one
+//!   record (`raw:HEX` is sent as is, with no record mark). Prints `serving` or
+//!   `bind-failed ERRNO`.
+//!
 //! Every line printed starts with the command's line number, so output stays aligned.
 
 use std::collections::HashMap;
@@ -298,6 +309,125 @@ fn ucall(uid: u32, rest: &[&str]) -> String {
     }
 }
 
+/// The `responder` thread's reply to one call, if any.
+fn respond(req: &[u8], uaddr: &str, port: &str) -> Option<Vec<u8>> {
+    if req.len() < 24 {
+        return None;
+    }
+    let vers = u32::from_be_bytes(req[16..20].try_into().unwrap());
+    let mut r = req[..4].to_vec();
+    for w in [1u32, 0, 0, 0, 0] {
+        r.extend_from_slice(&w.to_be_bytes());
+    }
+    if vers == 2 {
+        let p: u32 = port.parse().ok()?;
+        r.extend_from_slice(&p.to_be_bytes());
+    } else {
+        if uaddr == "-" {
+            return None;
+        }
+        r.extend_from_slice(&(uaddr.len() as u32).to_be_bytes());
+        r.extend_from_slice(uaddr.as_bytes());
+        r.resize(r.len().div_ceil(4) * 4, 0);
+    }
+    r.extend_from_slice(&0u32.to_be_bytes());
+    Some(r)
+}
+
+fn responder(addr: &str, port: &str, uaddr: &str, pmapport: &str) -> String {
+    let s = match UdpSocket::bind(format!("{addr}:{port}")) {
+        Ok(s) => s,
+        Err(e) => return format!("bind-failed {}", errno(&e)),
+    };
+    let (u, p) = (uaddr.to_string(), pmapport.to_string());
+    std::thread::spawn(move || {
+        let mut b = [0u8; 9000];
+        while let Ok((n, from)) = s.recv_from(&mut b) {
+            if let Some(r) = respond(&b[..n], &u, &p) {
+                let _ = s.send_to(&r, from);
+            }
+        }
+    });
+    "responding".into()
+}
+
+/// A `fakesrv` reply for a call with this xid: the bytes, and whether to send them
+/// without a record mark.
+fn fake_reply(t: &str, xid: &[u8]) -> (Vec<u8>, bool) {
+    let (raw, t) = match t.strip_prefix("raw:") {
+        Some(r) => (true, r),
+        None => (false, t),
+    };
+    (unhex(&t.replace("XID", &hex(xid))), raw)
+}
+
+fn fakesrv(proto: &str, addr: &str, port: &str, replies: &[&str]) -> String {
+    let replies: Vec<String> = replies.iter().map(|s| s.to_string()).collect();
+    let at = format!("{addr}:{port}");
+    match proto {
+        "udp" => {
+            let s = match UdpSocket::bind(&at) {
+                Ok(s) => s,
+                Err(e) => return format!("bind-failed {}", errno(&e)),
+            };
+            std::thread::spawn(move || {
+                let mut b = [0u8; 9000];
+                while let Ok((n, from)) = s.recv_from(&mut b) {
+                    if n < 4 {
+                        continue;
+                    }
+                    for t in &replies {
+                        let _ = s.send_to(&fake_reply(t, &b[..4]).0, from);
+                    }
+                }
+            });
+        }
+        _ => {
+            let l = match std::net::TcpListener::bind(&at) {
+                Ok(l) => l,
+                Err(e) => return format!("bind-failed {}", errno(&e)),
+            };
+            std::thread::spawn(move || {
+                for c in l.incoming() {
+                    let Ok(mut c) = c else { continue };
+                    'conn: loop {
+                        // One record: fragments up to the last.
+                        let mut rec = Vec::new();
+                        loop {
+                            let mut h = [0u8; 4];
+                            if c.read_exact(&mut h).is_err() {
+                                break 'conn;
+                            }
+                            let h = u32::from_be_bytes(h);
+                            let mut f = vec![0u8; (h & 0x7fff_ffff) as usize];
+                            if c.read_exact(&mut f).is_err() {
+                                break 'conn;
+                            }
+                            rec.extend_from_slice(&f);
+                            if h & 0x8000_0000 != 0 {
+                                break;
+                            }
+                        }
+                        if rec.len() < 4 {
+                            continue;
+                        }
+                        for t in &replies {
+                            let (b, raw) = fake_reply(t, &rec[..4]);
+                            let mut m =
+                                if raw { Vec::new() } else { (0x8000_0000u32 | b.len() as u32).to_be_bytes().to_vec() };
+                            m.extend_from_slice(&b);
+                            if c.write_all(&m).is_err() {
+                                break 'conn;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+    "serving".into()
+}
+
 fn main() {
     let mut conns: HashMap<String, Conn> = HashMap::new();
     let stdin = std::io::stdin();
@@ -398,6 +528,8 @@ fn main() {
                 continue;
             }
             ["mem", kb] => mem(kb.parse().unwrap()),
+            ["responder", addr, port, uaddr, pmapport] => responder(addr, port, uaddr, pmapport),
+            ["fakesrv", proto @ ("udp" | "tcp"), addr, port, replies @ ..] => fakesrv(proto, addr, port, replies),
             ["sleep", ms] => {
                 std::thread::sleep(Duration::from_millis(ms.parse().unwrap()));
                 continue;

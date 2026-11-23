@@ -5,6 +5,10 @@
 //! bytes) into the input buffer with one `read()` per call, and decoding then works on
 //! that buffer only. Output: replies are written through a `sendsize` buffer, and a
 //! record is split into fragments exactly where libtirpc's `putlong`/`putbytes` flush.
+//!
+//! Clients (`clnt_vc`) use the stream in its ordinary blocking mode instead: input is
+//! read on demand, one `read()` of up to the free buffer per refill, through
+//! [`RecStream::skiprecord`] and [`RecStream::blocking_decoder`].
 
 use crate::xdr::{UNIT, XdrDecode, XdrEncode};
 
@@ -217,6 +221,96 @@ impl RecStream {
         true
     }
 
+    /// `fill_input_buf()`, blocking: one read into the buffer, starting at the same
+    /// offset within a unit as the old boundary.
+    fn fill_input_buf(&mut self, io: &mut dyn RecIo) -> bool {
+        let i = self.in_boundry % UNIT;
+        let len = self.in_buf.len() - i;
+        match io.read(&mut self.in_buf[i..i + len]) {
+            ReadResult::Data(n) => {
+                self.in_finger = i;
+                self.in_boundry = i + n;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `get_input_bytes()`, blocking.
+    fn get_input_bytes(&mut self, io: &mut dyn RecIo, out: &mut [u8]) -> bool {
+        let mut done = 0;
+        while done < out.len() {
+            let current = self.in_boundry - self.in_finger;
+            if current == 0 {
+                if !self.fill_input_buf(io) {
+                    return false;
+                }
+                continue;
+            }
+            let current = current.min(out.len() - done);
+            out[done..done + current].copy_from_slice(&self.in_buf[self.in_finger..self.in_finger + current]);
+            self.in_finger += current;
+            done += current;
+        }
+        true
+    }
+
+    /// `set_input_fragment()`, blocking. A zero header fails; `LAST_FRAG` with length 0
+    /// is accepted.
+    fn set_input_fragment(&mut self, io: &mut dyn RecIo) -> bool {
+        let mut h = [0u8; 4];
+        if !self.get_input_bytes(io, &mut h) {
+            return false;
+        }
+        let header = u32::from_be_bytes(h);
+        self.last_frag = header & LAST_FRAG != 0;
+        // QUIRK: last_frag is already cleared, so skiprecord() then reads the next
+        // header and skips that record too.
+        if header == 0 {
+            return false;
+        }
+        self.fbtbc = (header & !LAST_FRAG) as usize;
+        true
+    }
+
+    /// `skip_input_bytes()`, blocking.
+    fn skip_input_bytes(&mut self, io: &mut dyn RecIo, mut cnt: usize) -> bool {
+        while cnt > 0 {
+            let current = self.in_boundry - self.in_finger;
+            if current == 0 {
+                if !self.fill_input_buf(io) {
+                    return false;
+                }
+                continue;
+            }
+            let current = current.min(cnt);
+            self.in_finger += current;
+            cnt -= current;
+        }
+        true
+    }
+
+    /// `xdrrec_skiprecord()`, blocking: skip what is left of the current record, so that
+    /// decoding starts on the next one.
+    pub fn skiprecord(&mut self, io: &mut dyn RecIo) -> bool {
+        while self.fbtbc > 0 || !self.last_frag {
+            if !self.skip_input_bytes(io, self.fbtbc) {
+                return false;
+            }
+            self.fbtbc = 0;
+            if !self.last_frag && !self.set_input_fragment(io) {
+                return false;
+            }
+        }
+        self.last_frag = false;
+        true
+    }
+
+    /// The stream for decoding in blocking mode, reading through `io` as needed.
+    pub fn blocking_decoder<'a>(&'a mut self, io: &'a mut dyn RecIo) -> BlockingDecoder<'a> {
+        BlockingDecoder { r: self, io }
+    }
+
     /// The stream for decoding the current record.
     pub fn decoder(&mut self) -> RecDecoder<'_> {
         RecDecoder { r: self }
@@ -272,6 +366,66 @@ impl XdrDecode for RecDecoder<'_> {
     }
 
     /// `xdrrec_inline()`, decoding.
+    fn inline(&mut self, len: usize) -> Option<&[u8]> {
+        let r = &mut *self.r;
+        if len <= r.fbtbc && r.in_finger + len <= r.in_boundry {
+            let start = r.in_finger;
+            r.fbtbc -= len;
+            r.in_finger += len;
+            return Some(&r.in_buf[start..start + len]);
+        }
+        None
+    }
+}
+
+/// A [`RecStream`] in `XDR_DECODE`, blocking (a client's).
+pub struct BlockingDecoder<'a> {
+    r: &'a mut RecStream,
+    io: &'a mut dyn RecIo,
+}
+
+impl std::fmt::Debug for BlockingDecoder<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockingDecoder").field("r", &self.r).finish_non_exhaustive()
+    }
+}
+
+impl XdrDecode for BlockingDecoder<'_> {
+    /// `xdrrec_getlong()`.
+    fn get_long(&mut self) -> Option<u32> {
+        let r = &mut *self.r;
+        if r.fbtbc >= UNIT && r.in_boundry - r.in_finger >= UNIT {
+            let v = u32::from_be_bytes(r.in_buf[r.in_finger..r.in_finger + UNIT].try_into().unwrap());
+            r.fbtbc -= UNIT;
+            r.in_finger += UNIT;
+            return Some(v);
+        }
+        let mut b = [0u8; 4];
+        if self.get_bytes(&mut b) { Some(u32::from_be_bytes(b)) } else { None }
+    }
+
+    /// `xdrrec_getbytes()`: across fragments, reading as needed.
+    fn get_bytes(&mut self, out: &mut [u8]) -> bool {
+        let mut done = 0;
+        while done < out.len() {
+            let current = self.r.fbtbc;
+            if current == 0 {
+                if self.r.last_frag || !self.r.set_input_fragment(self.io) {
+                    return false;
+                }
+                continue;
+            }
+            let current = (out.len() - done).min(current);
+            if !self.r.get_input_bytes(self.io, &mut out[done..done + current]) {
+                return false;
+            }
+            self.r.fbtbc -= current;
+            done += current;
+        }
+        true
+    }
+
+    /// `xdrrec_inline()`, decoding: only from what is already buffered.
     fn inline(&mut self, len: usize) -> Option<&[u8]> {
         let r = &mut *self.r;
         if len <= r.fbtbc && r.in_finger + len <= r.in_boundry {
@@ -401,6 +555,50 @@ mod tests {
         let mut r = RecStream::new(9000, 9000, 9000);
         assert!(!r.getrec(&mut pipe(&0x8000_0000u32.to_be_bytes(), 4), &mut st, true));
         assert_eq!(st, XprtStat::Died);
+    }
+
+    struct Blocking {
+        input: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+    }
+
+    impl RecIo for Blocking {
+        fn read(&mut self, buf: &mut [u8]) -> ReadResult {
+            if self.pos == self.input.len() {
+                return ReadResult::Error;
+            }
+            let n = buf.len().min(self.chunk).min(self.input.len() - self.pos);
+            buf[..n].copy_from_slice(&self.input[self.pos..self.pos + n]);
+            self.pos += n;
+            ReadResult::Data(n)
+        }
+        fn write(&mut self, _: &[u8]) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn blocking_records() {
+        // Two fragments then a second record; the first is decoded across the
+        // fragment boundary, and skiprecord() drops the rest of it.
+        let mut input = 6u32.to_be_bytes().to_vec();
+        input.extend_from_slice(&[0, 0, 0, 1, 0, 0]);
+        input.extend_from_slice(&(0x8000_0006u32).to_be_bytes());
+        input.extend_from_slice(&[0, 2, 0, 0, 0, 3]);
+        input.extend_from_slice(&(0x8000_0004u32).to_be_bytes());
+        input.extend_from_slice(&[0, 0, 0, 9]);
+        let mut io = Blocking { input, pos: 0, chunk: 5 };
+        let mut r = RecStream::new(100, 100, 0);
+        assert!(r.skiprecord(&mut io));
+        {
+            let mut d = r.blocking_decoder(&mut io);
+            assert_eq!(d.get_long(), Some(1));
+            assert_eq!(d.get_long(), Some(2));
+        }
+        assert!(r.skiprecord(&mut io));
+        assert_eq!(r.blocking_decoder(&mut io).get_long(), Some(9));
+        assert!(!r.skiprecord(&mut io) || r.blocking_decoder(&mut io).get_long().is_none());
     }
 
     #[test]

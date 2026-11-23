@@ -61,6 +61,14 @@ pub fn rust_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rpcbind"))
 }
 
+/// rpcinfo-rs: another package's binary, so it is looked for next to rpcbind-rs (`make
+/// check` builds it first).
+pub fn rust_rpcinfo() -> PathBuf {
+    let p = rust_binary().with_file_name("rpcinfo");
+    assert!(p.exists(), "no {} (cargo build -p rpcinfo, with the same profile)", p.display());
+    p
+}
+
 pub fn probe_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rpcprobe"))
 }
@@ -488,8 +496,13 @@ fn read(t: &Path, f: &str) -> String {
     String::from_utf8_lossy(&std::fs::read(t.join(f)).unwrap_or_default()).to_string()
 }
 
-/// Run one implementation.
+/// Run one implementation, with C rpcinfo in `T/bin`.
 pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
+    run_with(case, bin, reference_rpcinfo().exists().then(reference_rpcinfo).as_deref(), label)
+}
+
+/// Run one daemon, with `rpcinfo` (if any) in `T/bin`.
+pub fn run_with(case: &Case, bin: &Path, rpcinfo: Option<&Path>, label: &str) -> Outcome {
     let base = workspace_dir().join("target/difftest").join(&case.name);
     let t = base.join(label);
     clean(&t);
@@ -511,8 +524,8 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
         link(&shim(), "bin/faketime.so");
         std::fs::write(t.join("faketime"), format!("{secs:020} 000000000\n")).unwrap();
     }
-    if reference_rpcinfo().exists() {
-        link(&reference_rpcinfo(), "bin/rpcinfo");
+    if let Some(p) = rpcinfo {
+        link(p, "bin/rpcinfo");
     }
     let root = fixed_root();
     let probe: Vec<String> = case.probe.iter().map(|l| l.replace("@T@", root.to_str().unwrap())).collect();
@@ -571,12 +584,34 @@ pub fn check(case: Case) -> Outcome {
     if std::env::var_os("RPCBIND_DIFF_SHOW").is_some() {
         eprintln!("=== {} ===\n{c:#?}", case.name);
     }
+    compare(&case.name, &c, &r, "Rust");
+    c
+}
+
+/// Run C rpcbind with C rpcinfo, C rpcbind with rpcinfo-rs, and rpcbind-rs with
+/// rpcinfo-rs, and compare the last two with the first; returns the C outcome.
+pub fn check_rpcinfo(case: Case) -> Outcome {
+    let (cb, rb) = (reference_binary(), rust_binary());
+    let (ci, ri) = (reference_rpcinfo(), rust_rpcinfo());
+    assert!(ci.exists(), "no C rpcinfo at {}", ci.display());
+    let c = run_with(&case, &cb, Some(&ci), "c");
+    let cr = run_with(&case, &cb, Some(&ri), "cr");
+    let r = run_with(&case, &rb, Some(&ri), "r");
+    if std::env::var_os("RPCBIND_DIFF_SHOW").is_some() {
+        eprintln!("=== {} ===\n{c:#?}", case.name);
+    }
+    compare(&case.name, &c, &cr, "C rpcbind + Rust rpcinfo");
+    compare(&case.name, &c, &r, "Rust");
+    c
+}
+
+fn compare(name: &str, c: &Outcome, r: &Outcome, label: &str) {
     if c != r {
-        let mut msg = format!("case {} differs:\n", case.name);
+        let mut msg = format!("case {name} differs:\n");
         macro_rules! field {
             ($f:ident) => {
                 if c.$f != r.$f {
-                    msg.push_str(&format!("--- {}\n  C:    {:?}\n  Rust: {:?}\n", stringify!($f), c.$f, r.$f));
+                    msg.push_str(&format!("--- {}\n  C:    {:?}\n  {label}: {:?}\n", stringify!($f), c.$f, r.$f));
                 }
             };
         }
@@ -590,7 +625,47 @@ pub fn check(case: Case) -> Outcome {
         field!(run_after);
         panic!("{msg}");
     }
-    c
+}
+
+/// `struct rpcb` arguments.
+pub fn rpcb(prog: u32, vers: u32, netid: &str, addr: &str, owner: &str) -> String {
+    format!(
+        "{}{}{}{}",
+        words(&[prog, vers]),
+        opaque(netid.as_bytes()),
+        opaque(addr.as_bytes()),
+        opaque(owner.as_bytes())
+    )
+}
+
+/// `struct pmap` arguments.
+pub fn pmap(prog: u32, vers: u32, prot: u32, port: u32) -> String {
+    words(&[prog, vers, prot, port])
+}
+
+/// A probe command sending `msg` on a fresh connection to the local socket, then
+/// reading the reply.
+pub fn local(c: Case, name: &str, msg: &str) -> Case {
+    c.probe(format!("conn {name} unix /run/rpcbind.sock"))
+        .probe(format!("send {name} {}", record(msg)))
+        .probe(format!("recv {name}"))
+        .probe(format!("close {name}"))
+}
+
+pub fn tcp(c: Case, name: &str, host: &str, msg: &str) -> Case {
+    c.probe(format!("conn {name} tcp {host} 111"))
+        .probe(format!("send {name} {}", record(msg)))
+        .probe(format!("recv {name}"))
+        .probe(format!("close {name}"))
+}
+
+/// Non-loopback interfaces: a netkit pair, with IPv4 and IPv6 addresses on both ends.
+pub fn interfaces(c: Case) -> Case {
+    c.setup("ip link add n0 type netkit peer name n1 || exit 93")
+        .setup("ip link set n0 up; ip link set n1 up")
+        .setup("ip addr add 192.168.50.1/24 dev n0; ip addr add 192.168.60.1/24 dev n1")
+        .setup("ip addr add fd00:50::1/64 dev n0 nodad; ip addr add fd00:60::1/64 dev n1 nodad")
+        .setup("ip addr add 10.9.0.1/16 dev lo")
 }
 
 // ---------------------------------------------------------------------------

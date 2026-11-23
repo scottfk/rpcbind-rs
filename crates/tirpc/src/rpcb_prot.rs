@@ -7,7 +7,7 @@ use crate::xdr::{self, RPC_MAXDATASIZE, XdrDecode, XdrEncode};
 
 /// The bytes of a decoded string up to its first NUL: everything that uses it in C
 /// (`strdup`, `strcmp`, `strlen`) stops there.
-fn c_str(mut v: Vec<u8>) -> Vec<u8> {
+pub fn c_str(mut v: Vec<u8>) -> Vec<u8> {
     if let Some(n) = v.iter().position(|&b| b == 0) {
         v.truncate(n);
     }
@@ -228,4 +228,70 @@ pub fn put_rpcb_stat_byvers(x: &mut dyn XdrEncode, inf: &[RpcbStat; RPCBVERS_STA
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------------
+// client-side decoding (rpcinfo)
+
+/// `xdr_pmaplist_ptr()` decoding.
+pub fn get_pmaplist(x: &mut dyn XdrDecode) -> Option<Vec<Pmap>> {
+    let mut v = Vec::new();
+    while xdr::get_bool(x)? {
+        v.push(get_pmap(x)?);
+    }
+    Some(v)
+}
+
+/// `xdr_rpcblist_ptr()` decoding.
+pub fn get_rpcblist(x: &mut dyn XdrDecode) -> Option<Vec<Rpcb>> {
+    let mut v = Vec::new();
+    while xdr::get_bool(x)? {
+        v.push(get_rpcb(x)?);
+    }
+    Some(v)
+}
+
+/// `xdr_rpcb_entry_list_ptr()` decoding.
+pub fn get_rpcb_entry_list(x: &mut dyn XdrDecode) -> Option<Vec<RpcbEntry>> {
+    let mut v = Vec::new();
+    while xdr::get_bool(x)? {
+        let maddr = c_str(xdr::get_string(x, RPC_MAXDATASIZE)?);
+        let nc_netid = c_str(xdr::get_string(x, RPC_MAXDATASIZE)?);
+        let nc_semantics = x.get_long()?;
+        let nc_protofmly = c_str(xdr::get_string(x, RPC_MAXDATASIZE)?);
+        let nc_proto = c_str(xdr::get_string(x, RPC_MAXDATASIZE)?);
+        v.push(RpcbEntry { maddr, nc_netid, nc_semantics, nc_protofmly, nc_proto });
+    }
+    Some(v)
+}
+
+/// `xdr_rpcb_stat_byvers()` decoding.
+pub fn get_rpcb_stat_byvers(x: &mut dyn XdrDecode) -> Option<[RpcbStat; RPCBVERS_STAT]> {
+    let mut out: [RpcbStat; RPCBVERS_STAT] = Default::default();
+    for s in &mut out {
+        for v in &mut s.info {
+            *v = xdr::get_i32(x)?;
+        }
+        s.setinfo = xdr::get_i32(x)?;
+        s.unsetinfo = xdr::get_i32(x)?;
+        while xdr::get_bool(x)? {
+            let prog = x.get_long()?;
+            let vers = x.get_long()?;
+            let success = xdr::get_i32(x)?;
+            let failure = xdr::get_i32(x)?;
+            let netid = c_str(xdr::get_string(x, RPC_MAXDATASIZE)?);
+            s.addrinfo.push(AddrStat { prog, vers, success, failure, netid });
+        }
+        while xdr::get_bool(x)? {
+            let prog = x.get_long()?;
+            let vers = x.get_long()?;
+            let proc_ = x.get_long()?;
+            let success = xdr::get_i32(x)?;
+            let failure = xdr::get_i32(x)?;
+            let indirect = xdr::get_i32(x)?;
+            let netid = c_str(xdr::get_string(x, RPC_MAXDATASIZE)?);
+            s.rmtinfo.push(RmtcallStat { prog, vers, proc_, success, failure, indirect, netid });
+        }
+    }
+    Some(out)
 }
