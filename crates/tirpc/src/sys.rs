@@ -564,6 +564,8 @@ pub struct IfAddr {
     /// The address and netmask as raw sockaddr bytes (`sockaddr_storage` size), if any.
     pub addr: Option<Vec<u8>>,
     pub netmask: Option<Vec<u8>>,
+    /// `ifa_broadaddr` (the `ifa_ifu` union), likewise.
+    pub broadaddr: Option<Vec<u8>>,
 }
 
 /// `getifaddrs()`, in the list's order.
@@ -602,6 +604,7 @@ pub fn getifaddrs() -> Option<Vec<IfAddr>> {
                 flags: a.ifa_flags,
                 addr: sa(a.ifa_addr),
                 netmask: sa(a.ifa_netmask),
+                broadaddr: sa(a.ifa_ifu),
             });
             p = a.ifa_next;
         }
@@ -676,6 +679,23 @@ impl Args {
     }
 }
 
+impl Args {
+    /// `argv + optind`: the operands left after [`Args::getopt`] returned -1 (glibc
+    /// moves them to the end).
+    pub fn rest(&self) -> Vec<Vec<u8>> {
+        unsafe extern "C" {
+            static mut optind: c_int;
+        }
+        // SAFETY: optind is getopt's global, read after it is done.
+        let i = (unsafe { optind } as usize).min(self.ptrs.len() - 1);
+        self.ptrs[i..self.ptrs.len() - 1]
+            .iter()
+            // SAFETY: each pointer is one of our live CStrings.
+            .map(|&p| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
+            .collect()
+    }
+}
+
 /// `raise(sig)`.
 pub fn raise(sig: i32) -> i32 {
     // SAFETY: no memory arguments.
@@ -710,4 +730,294 @@ pub fn malloc_ok(n: usize) -> bool {
 pub fn time() -> i64 {
     // SAFETY: a null pointer is allowed.
     unsafe { libc::time(std::ptr::null_mut()) }
+}
+
+// ---------------------------------------------------------------------------
+// for the client side (rpcinfo)
+
+/// A sockaddr in a `sockaddr_storage`-sized buffer, for passing to the kernel.
+fn ss_buf(addr: &[u8]) -> [u8; SS_LEN] {
+    let mut ss = [0u8; SS_LEN];
+    let n = addr.len().min(SS_LEN);
+    ss[..n].copy_from_slice(&addr[..n]);
+    ss
+}
+
+/// `connect(fd, addr, len)`: `Err(errno)` on failure.
+pub fn connect(fd: Fd, addr: &[u8], len: usize) -> Result<(), i32> {
+    let ss = ss_buf(addr);
+    // SAFETY: ss is a sockaddr_storage-sized buffer; len is clamped to it.
+    let r = unsafe { libc::connect(fd, ss.as_ptr().cast(), len.min(SS_LEN) as libc::socklen_t) };
+    if r < 0 { Err(errno()) } else { Ok(()) }
+}
+
+/// `sendto(fd, buf, len, 0, addr, alen)`, or with no address when `addr` is `None`.
+pub fn sendto(fd: Fd, buf: &[u8], addr: Option<(&[u8], usize)>) -> isize {
+    match addr {
+        None => {
+            // SAFETY: buf is valid for its length; a null address is allowed.
+            unsafe { libc::sendto(fd, buf.as_ptr().cast(), buf.len(), 0, std::ptr::null(), 0) }
+        }
+        Some((a, len)) => {
+            let ss = ss_buf(a);
+            // SAFETY: buf is valid for its length; ss holds the address.
+            unsafe {
+                libc::sendto(
+                    fd,
+                    buf.as_ptr().cast(),
+                    buf.len(),
+                    0,
+                    ss.as_ptr().cast(),
+                    len.min(SS_LEN) as libc::socklen_t,
+                )
+            }
+        }
+    }
+}
+
+/// `recvfrom(fd, buf, len, 0, NULL, NULL)`: the count or `Err(errno)`.
+pub fn recvfrom(fd: Fd, buf: &mut [u8]) -> Result<usize, i32> {
+    // SAFETY: buf is valid for writing its length; null address pointers are allowed.
+    let r = unsafe {
+        libc::recvfrom(fd, buf.as_mut_ptr().cast(), buf.len(), 0, std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    if r < 0 { Err(errno()) } else { Ok(r as usize) }
+}
+
+/// `recvfrom(fd, buf, len, 0, &ss, &alen)` with `alen` in and out: the count or
+/// `Err(errno)`. The address goes into `ss` (a `sockaddr_storage`).
+pub fn recvfrom_addr(fd: Fd, buf: &mut [u8], ss: &mut [u8; SS_LEN], alen: &mut usize) -> Result<usize, i32> {
+    let mut len = (*alen).min(SS_LEN) as libc::socklen_t;
+    // SAFETY: buf and ss are valid for writing; len is at most ss's size.
+    let r = unsafe { libc::recvfrom(fd, buf.as_mut_ptr().cast(), buf.len(), 0, ss.as_mut_ptr().cast(), &mut len) };
+    if r < 0 {
+        return Err(errno());
+    }
+    *alen = len as usize;
+    Ok(r as usize)
+}
+
+/// What `recvmsg(fd, &msg, MSG_ERRQUEUE)` returned for `clnt_dg_call()`.
+#[derive(Debug)]
+pub struct ErrQueue {
+    pub len: usize,
+    /// The payload (an `outlen`-byte buffer).
+    pub data: Vec<u8>,
+    /// The `sockaddr_in` the offender's address went into, and the length returned.
+    pub name: Vec<u8>,
+    pub namelen: usize,
+    pub flags: i32,
+    /// Each control message: level, type and data.
+    pub cmsgs: Vec<(i32, i32, Vec<u8>)>,
+}
+
+/// `recvmsg(fd, &msg, MSG_ERRQUEUE)` with an `iov_len`-byte payload buffer, a
+/// `sockaddr_in` name and a 256-byte control buffer, as `clnt_dg_call()` does.
+pub fn recvmsg_errqueue(fd: Fd, iov_len: usize) -> Result<ErrQueue, i32> {
+    let mut data = vec![0u8; iov_len];
+    let mut name = [0u8; size_of::<libc::sockaddr_in>()];
+    let mut ctl = [0u8; 256];
+    let mut iov = libc::iovec { iov_base: data.as_mut_ptr().cast(), iov_len };
+    // SAFETY: an all-zero msghdr is valid.
+    let mut m: libc::msghdr = unsafe { std::mem::zeroed() };
+    m.msg_name = name.as_mut_ptr().cast();
+    m.msg_namelen = name.len() as libc::socklen_t;
+    m.msg_iov = &mut iov;
+    m.msg_iovlen = 1;
+    m.msg_control = ctl.as_mut_ptr().cast();
+    m.msg_controllen = ctl.len();
+    // SAFETY: every pointer in m refers to a live buffer of the stated size.
+    let r = unsafe { libc::recvmsg(fd, &mut m, libc::MSG_ERRQUEUE) };
+    if r < 0 {
+        return Err(errno());
+    }
+    let mut cmsgs = Vec::new();
+    // SAFETY: m describes the control buffer the kernel filled; CMSG_* walk it within
+    // msg_controllen.
+    unsafe {
+        let mut c = libc::CMSG_FIRSTHDR(&m);
+        while !c.is_null() {
+            let hdr = &*c;
+            let dlen = hdr.cmsg_len.saturating_sub(libc::CMSG_LEN(0) as usize);
+            let d = std::slice::from_raw_parts(libc::CMSG_DATA(c), dlen).to_vec();
+            cmsgs.push((hdr.cmsg_level, hdr.cmsg_type, d));
+            c = libc::CMSG_NXTHDR(&m, c);
+        }
+    }
+    Ok(ErrQueue {
+        len: r as usize,
+        data,
+        name: name.to_vec(),
+        namelen: m.msg_namelen as usize,
+        flags: m.msg_flags,
+        cmsgs,
+    })
+}
+
+/// `ioctl(fd, FIONBIO, &1)`.
+pub fn set_fionbio(fd: Fd) {
+    let one: c_int = 1;
+    // SAFETY: FIONBIO takes a pointer to an int.
+    unsafe { libc::ioctl(fd, libc::FIONBIO, &one) };
+}
+
+/// `fcntl(fd, F_DUPFD, min)`.
+pub fn dupfd(fd: Fd, min: Fd) -> Fd {
+    // SAFETY: no memory arguments.
+    unsafe { libc::fcntl(fd, libc::F_DUPFD, min) }
+}
+
+/// `fsync(fd)`.
+pub fn fsync(fd: Fd) -> i32 {
+    // SAFETY: no memory arguments.
+    unsafe { libc::fsync(fd) }
+}
+
+/// `getpid()`.
+pub fn getpid() -> i32 {
+    // SAFETY: no arguments.
+    unsafe { libc::getpid() }
+}
+
+/// `getegid()`.
+pub fn getegid() -> u32 {
+    // SAFETY: no arguments.
+    unsafe { libc::getegid() }
+}
+
+/// `getgroups()`: the supplementary groups, or `Err(errno)`.
+pub fn getgroups() -> Result<Vec<u32>, i32> {
+    loop {
+        // SAFETY: a zero size with a null list only counts.
+        let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        if n < 0 {
+            return Err(errno());
+        }
+        let mut g = vec![0 as libc::gid_t; n as usize + 1];
+        // SAFETY: g has room for n groups.
+        let m = unsafe { libc::getgroups(n, g.as_mut_ptr()) };
+        if m < 0 {
+            let e = errno();
+            if e == libc::EINVAL {
+                continue;
+            }
+            return Err(e);
+        }
+        g.truncate(m as usize);
+        return Ok(g);
+    }
+}
+
+/// `gethostname(buf, MAXHOSTNAMELEN + 1)`, NUL-terminated at the end of the buffer.
+pub fn gethostname() -> Result<Vec<u8>, i32> {
+    let mut b = [0 as c_char; 65];
+    // SAFETY: b is valid for its length.
+    if unsafe { libc::gethostname(b.as_mut_ptr(), b.len()) } < 0 {
+        return Err(errno());
+    }
+    b[64] = 0;
+    // SAFETY: b is NUL-terminated.
+    Ok(unsafe { CStr::from_ptr(b.as_ptr()) }.to_bytes().to_vec())
+}
+
+/// Every `getaddrinfo(host, service, hints)` result, in order, or the error code.
+pub fn getaddrinfo_all(
+    host: Option<&[u8]>,
+    service: &[u8],
+    family: i32,
+    socktype: i32,
+    protocol: i32,
+) -> Result<Vec<AddrInfo>, i32> {
+    let h = host.map(cstring);
+    let s = cstring(service);
+    // SAFETY: an all-zero addrinfo is a valid hints struct.
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_family = family;
+    hints.ai_socktype = socktype;
+    hints.ai_protocol = protocol;
+    let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+    // SAFETY: the strings are NUL-terminated (host may be NULL); res receives a list
+    // freed below.
+    let r =
+        unsafe { libc::getaddrinfo(h.as_ref().map_or(std::ptr::null(), |h| h.as_ptr()), s.as_ptr(), &hints, &mut res) };
+    if r != 0 {
+        return Err(r);
+    }
+    let mut out = Vec::new();
+    let mut p = res;
+    while !p.is_null() {
+        // SAFETY: p is a node of the list, with ai_addrlen bytes of address.
+        unsafe {
+            let a = &*p;
+            let addr = std::slice::from_raw_parts(a.ai_addr.cast::<u8>(), a.ai_addrlen as usize).to_vec();
+            out.push(AddrInfo { family: a.ai_family, socktype: a.ai_socktype, protocol: a.ai_protocol, addr });
+            p = a.ai_next;
+        }
+    }
+    // SAFETY: res came from getaddrinfo.
+    unsafe { libc::freeaddrinfo(res) };
+    Ok(out)
+}
+
+/// `getnameinfo(addr, len, host, NI_MAXHOST, NULL, 0, flags)`: the host name, or the
+/// error code.
+pub fn getnameinfo(addr: &[u8], len: usize, flags: i32) -> Result<Vec<u8>, i32> {
+    let ss = ss_buf(addr);
+    let mut host = [0 as c_char; 1025];
+    // SAFETY: ss holds len (clamped) bytes; host is NI_MAXHOST bytes.
+    let r = unsafe {
+        libc::getnameinfo(
+            ss.as_ptr().cast(),
+            len.min(SS_LEN) as libc::socklen_t,
+            host.as_mut_ptr(),
+            host.len() as libc::socklen_t,
+            std::ptr::null_mut(),
+            0,
+            flags,
+        )
+    };
+    if r != 0 {
+        return Err(r);
+    }
+    // SAFETY: getnameinfo NUL-terminates on success.
+    Ok(unsafe { CStr::from_ptr(host.as_ptr()) }.to_bytes().to_vec())
+}
+
+/// `getrpcbyname(name)->r_number`.
+pub fn rpc_number(name: &[u8]) -> Option<i32> {
+    unsafe extern "C" {
+        fn getrpcbyname(name: *const c_char) -> *mut RpcEnt;
+    }
+    let n = cstring(name);
+    // SAFETY: n is NUL-terminated; the result is NULL or static storage, read at once.
+    unsafe {
+        let e = getrpcbyname(n.as_ptr());
+        if e.is_null() { None } else { Some((*e).r_number) }
+    }
+}
+
+/// `strtol(s, &end, 10)`: the value (saturated as glibc does) and whether all of `s`
+/// was used and at least one digit was read (`end != s && *end == '\0'`).
+pub fn strtol10(s: &[u8]) -> (i64, bool) {
+    let c = cstring(s);
+    let mut end: *mut c_char = std::ptr::null_mut();
+    // SAFETY: c is NUL-terminated; end receives a pointer into it.
+    let v = unsafe { libc::strtol(c.as_ptr(), &mut end, 10) };
+    // SAFETY: end points into c, at or after its start.
+    let used = unsafe { end.offset_from(c.as_ptr()) } as usize;
+    (v as i64, used != 0 && used == c.as_bytes().len())
+}
+
+/// `strtoul(s, &end, 0)`: the value, how many bytes were used, and whether errno was
+/// `ERANGE`.
+pub fn strtoul0(s: &[u8]) -> (u64, usize, bool) {
+    let c = cstring(s);
+    let mut end: *mut c_char = std::ptr::null_mut();
+    set_errno(0);
+    // SAFETY: c is NUL-terminated; end receives a pointer into it.
+    let v = unsafe { libc::strtoul(c.as_ptr(), &mut end, 0) };
+    let erange = errno() == libc::ERANGE;
+    // SAFETY: end points into c, at or after its start.
+    let used = unsafe { end.offset_from(c.as_ptr()) } as usize;
+    (v as u64, used, erange)
 }

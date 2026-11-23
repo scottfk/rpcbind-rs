@@ -65,3 +65,27 @@ cosmetic or hard to hit.
 | low | The address conversions use the family of the transport the call came in on, not the family in the address; a `TADDR2UADDR` netbuf shorter than that family's sockaddr gives "". | `rpcb_svc_com.rs` (`*_com`) | `address_conversion` |
 | low | A `DUMP` (or any reply) over UDP that doesn't fit in 9000 bytes gets `SYSTEM_ERR`, after the partial reply was encoded into the shared buffer. | `rpcb_svc.rs` (`serve`) | `big_dump` |
 | low | With `-d`, a `TADDR2UADDR` whose netbuf claims a `maxlen` over 9000 is also logged as "unable to free arguments" after the decode error (in version 3 without a newline): `xdr_netbuf()` checks the limit when freeing too, and refuses. With `-a` as well, rpcbind then aborts, so any client can stop a `-d -a` rpcbind. | `rpcb_svc.rs` (`serve`), `tirpc::rpcb_prot` (`netbuf_frees`) | `netbuf_free_failure` |
+
+## Clients (libtirpc clnt_*.c, rpcb_clnt.c, clnt_bcast.c, clnt_perror.c)
+
+| Severity | Quirk | Where | Test |
+|---|---|---|---|
+| medium | A UDP reply with another call's xid, or shorter than 4 bytes, costs the call a whole retransmit interval (15 s, more than rpcinfo's 10 s timeout) and resends at once: one stale or short datagram ends the call with "Timed out" immediately. | `tirpc::clnt` (`dg_call`) | `odd_servers` |
+| low | On a stream, a reply that doesn't decode (a call, a verifier over 400 bytes) is skipped and the next record read. A zero record mark fails the decode with `last_frag` already cleared, so the skip that follows swallows the next record as well and the call times out. | `tirpc::clnt` (`vc_call`), `tirpc::xdr_rec` (`set_input_fragment`) | `odd_servers` |
+| low | `clnt_spcreateerror()` messages are cut at 255 bytes. With a long host name libtirpc first appends past its 256-byte buffer (its `strncat()` limits come from a length it doesn't update): a heap overflow in C, only the cut here. | `tirpc::clnt` (`spcreateerror`) | `long_names` |
+| low | `RPCB_V2FIRST`, once seen, stays on for the rest of the process (a static). | `tirpc::rpcb_clnt` (`rpcb_findaddr_timed`) | `environment` |
+| low | Without the local socket, `rpcb_unset()` (`rpcinfo -d`) falls back to the *last* IPv4 or IPv6 stream transport in `/etc/netconfig` (tcp6 at `::1`, normally). rpcinfo's own local lookups (no host given) don't fall back. | `tirpc::rpcb_clnt` (`local_rpcb`) | `no_local_socket`, `custom_netconfig` |
+| low | A netid libtirpc has no socket type for (any name but `udp`, `tcp`, `udp6`, `tcp6`, `local`, `unix`) makes `__rpc_nconf2fd()` return 0, so the client uses standard input as its socket: "Socket operation on non-socket", or "Unknown protocol" where the netid is looked up first. | `tirpc::svc` (`nconf2fd`), `tirpc::clnt` (`clnt_tli_create`) | `custom_netconfig` |
+| low | In a broadcast, an IPv6 universal address in a reply that came over IPv4 is "fixed up" with port 0 (the port is read from the netbuf header, not its buffer). The portmap packet goes out on udp6 too. C decodes a reply's address into a 1024-byte stack buffer with a 9000-byte limit, an overflow for a longer one; that isn't reproduced. | `tirpc::bcast` (`ipv6v4_fixup`, `get_rpcb_rmtcallres`) | `broadcast_replies`, `broadcast_odd_replies` |
+
+## rpcinfo (rpcinfo.c)
+
+| Severity | Quirk | Where | Test |
+|---|---|---|---|
+| low | `getprognum()` steps past the first non-digit before testing it, so `-5` and `12a` are looked up as service names and `12-` is an illegal number. | `rpcinfo` (`getprognum`) | `arguments` |
+| low | Versions are `(int) strtol()` stored in a `u_long`: `-1` and `4294967295` are both reported as version 18446744073709551615 by `-t`/`-u` (and sent as 4294967295). Program numbers keep `strtol()`'s `long`, so 4294967296 is sent as 0. | `rpcinfo` (`getvers`) | `pings` |
+| low | `-s` keeps versions as `int`s compared with the unsigned version, so a version of 2^31 or more is listed again (negative) for each registration; a versions column wider than 10 runs into the netids. | `rpcinfo` (`rpcbdump`) | `dumps`, `deletes` |
+| low | `-d` parses the version before the program (gcc evaluates `rpcb_unset()`'s arguments right to left): with both bad, the version is reported. | `rpcinfo` (`deletereg`) | `deletes` |
+| low | `-n PORT` is checked but never used by `-t`/`-u`; only `-p` rejects it. `rpcinfo host prog` without `-T` is a usage error (the `NETPATH` branch is unreachable). | `rpcinfo` (`ip_ping`, `progping`) | `arguments`, `pings` |
+| low | For a host, rpcinfo's own `getclnthandle()` uses the first address `getaddrinfo(host, "rpcbind")` gives, whatever its family: if a name's first address is IPv6, the IPv4 transports get "Unknown host". | `rpcinfo` (`getclnthandle`) | — |
+| low | Version discovery against a server that accepts every version doesn't end: `-a` and `-T` count in 32 bits up to 2^32-1, which wraps; `-t`/`-u` stop after 4 billion pings. A `PROG_UNAVAIL` answer to `DUMP` reads the versions from whatever the error held, and unless they say 4 or 2, prints "No remote programs registered." | `rpcinfo` (`addrping`, `progping`, `rpcbdump`) | — |

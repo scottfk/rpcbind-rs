@@ -1,6 +1,7 @@
 # Makefile - convenience targets for rpcbind-rs
 #
 # 20261121 - Created by Claude (claude.ai, Anthropic) - scottfk
+# 20261123 - Build rpcinfo-rs before the tests, which run it - Claude - scottfk
 
 REFERENCE ?= ../rpcbind
 
@@ -14,6 +15,7 @@ reference:
 
 check:
 	@test -x $(REFERENCE)/rpcbind || tools/build-reference.sh $(REFERENCE)
+	cargo build --release -p rpcinfo
 	RPCBIND_REFERENCE=$(abspath $(REFERENCE)) cargo test --release
 
 clippy:

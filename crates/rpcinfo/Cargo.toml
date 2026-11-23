@@ -1,0 +1,19 @@
+[package]
+name = "rpcinfo"
+description = "Drop-in Rust port of rpcinfo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rpcinfo"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+tirpc = { path = "../tirpc" }
+
+[lints]
+workspace = true

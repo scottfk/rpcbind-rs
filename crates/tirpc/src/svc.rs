@@ -320,7 +320,7 @@ fn sockisbound(fd: Fd) -> bool {
 }
 
 /// `__rpc_get_t_size()`.
-fn get_t_size(proto: i32, size: usize) -> usize {
+pub fn get_t_size(proto: i32, size: usize) -> usize {
     let maxsize = 256 * 1024;
     let defsize = match proto {
         libc::IPPROTO_TCP => 64 * 1024,

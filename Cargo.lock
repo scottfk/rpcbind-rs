@@ -17,6 +17,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpcinfo"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tirpc",
+]
+
+[[package]]
 name = "tirpc"
 version = "0.1.0"
 dependencies = [

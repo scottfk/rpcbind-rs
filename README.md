@@ -22,9 +22,10 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Phases 1 to 3 of 5 are done: phases 1 and 2 are merged (PRs #2 and #3) and phase 3,
-hostile input, is on branch `phase3-hostile` (PR #4). The port serves every procedure C
-rpcbind does in this build and holds up the same way under floods, stalls and garbage.
+Phases 1 to 4 of 5 are done: phases 1 to 3 are merged (PRs #2, #3 and #4) and phase 4,
+`rpcinfo`, is on branch `phase4-rpcinfo` (PR #5). The port serves every procedure C
+rpcbind does in this build and holds up the same way under floods, stalls and garbage,
+and rpcinfo-rs gives the same output as C rpcinfo in every mode.
 
 Phase 1, the RPC layer in `crates/tirpc` and rpcbind's startup:
 
@@ -58,11 +59,26 @@ Phase 3, hostile input:
   `svc_freeargs()` failure for oversized netbufs and how libtirpc's leftover
   credential bytes are left by failed decodes and move with the poll table.
 
-The differential suite has 57 tests (94 cases), all passing: 32 from phase 1, 15 for the
-protocol and 10 for hostile input. Mutants that undo reproduced quirks are caught (four
-in phase 1, five in phase 2, five in phase 3).
+Phase 4, `rpcinfo`:
 
-Next: phase 4, rpcinfo.
+- the client half of libtirpc in `crates/tirpc`: stream and datagram clients
+  (`clnt_vc.c`, `clnt_dg.c`, with the record stream's blocking mode), `clnt_generic.c`,
+  `bindresvport.c`, reply decoding (`rpc_prot.c`), `clnt_perror.c`, the rpcbind client
+  calls (`rpcb_clnt.c`: the address cache, `GETADDR` with the portmap fallback,
+  `rpcb_unset()`), `clnt_bcast.c`, transport classes and `NETPATH` (`getnetpath.c`);
+- `rpcinfo.c` in `crates/rpcinfo`: every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-t`, `-u`,
+  `-a`, `-b`, `-d`, `-n`) with its messages, exit codes and output formats.
+
+Each rpcinfo case runs three ways (C rpcbind with C rpcinfo, C rpcbind with rpcinfo-rs,
+rpcbind-rs with rpcinfo-rs), and all three must agree. Besides rpcbind itself they talk
+to fake servers in the probe: scripted replies over UDP and TCP (garbage, stale xids,
+denials, unknown statuses, a zero record mark, silence) and a broadcast responder.
+
+The differential suite has 73 tests (110 cases), all passing: 32 from phase 1, 15 for
+the protocol, 10 for hostile input and 16 for rpcinfo. Mutants that undo reproduced
+quirks are caught (four in phase 1, five in phase 2, five in phase 3, nine in phase 4).
+
+Next: phase 5, packaging.
 
 The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
 step lands.
@@ -89,12 +105,12 @@ The port follows the files:
 
 | Path | What |
 |---|---|
-| `crates/tirpc/` | the libtirpc subset: XDR, RPC messages and auth (`AUTH_NONE`, `AUTH_SYS`), record marking, the datagram, stream and local transports (with peer credentials), the service dispatcher, `/etc/netconfig`, universal addresses, and `sys.rs` (every libc call) |
+| `crates/tirpc/` | the libtirpc subset: XDR, RPC messages and auth (`AUTH_NONE`, `AUTH_SYS`), record marking, the datagram, stream and local transports (with peer credentials), the service dispatcher, the clients, the rpcbind client calls and broadcast, `/etc/netconfig` and `NETPATH`, universal addresses, and `sys.rs` (every libc call) |
 | `crates/rpcbind/src/main.rs` | `rpcbind.c`: options, the lock, transports from netconfig, privilege drop, the loop |
 | `crates/rpcbind/src/rpcb_svc_com.rs` | `rpcb_svc_com.c`: the registration list, `SET`/`UNSET`, `GETADDR`, `DUMP`, `GETTIME`, address conversions |
 | `crates/rpcbind/src/{pmap_svc,rpcb_svc,rpcb_svc_4,rpcb_stat}.rs` | the v2, v3 and v4 dispatchers and `GETSTAT` |
 | `crates/rpcbind/src/{security,check_bound,util,xlog}.rs` | access checks and `-l` logging, the transport list, `addrmerge()`, messages |
-| `crates/rpcinfo/` | `rpcinfo.c` |
+| `crates/rpcinfo/` | `rpcinfo.c`: every mode, over the `tirpc` clients |
 | `tests/` | differential tests and the harness |
 | `contrib/gentoo/` | a `net-nds/rpcbind` live ebuild, and how to switch and roll back |
 | `tools/` | the reference build |
@@ -105,8 +121,8 @@ The port follows the files:
 make check
 ```
 
-This builds the C reference into `../rpcbind` if it isn't there, then runs the unit
-tests and the differential suite ([crates/rpcbind/tests/](crates/rpcbind/tests/)). Each
+This builds the C reference into `../rpcbind` if it isn't there, builds rpcinfo-rs,
+then runs the unit tests and the differential suite ([crates/rpcbind/tests/](crates/rpcbind/tests/)). Each
 case starts C rpcbind and then the port, each in a private user, mount, network and pid
 namespace (ids mapped from your subordinate ranges, so there's a real root and the
 system's users exist; its own loopback, `/proc` and `/run`; `/dev/log` captured; the
@@ -120,15 +136,19 @@ case's own `/etc/netconfig` if it has one), sends both the same requests with
   and `/run` (names, modes, owners) before and after the signal that ends it.
 
 To see what each case produced: `RPCBIND_DIFF_SHOW=1 cargo test -- --nocapture`. Each
-run's files stay in `target/difftest/<case>/{c,r}/`.
+run's files stay in `target/difftest/<case>/{c,r}/` (and `cr/`, C rpcbind with
+rpcinfo-rs, for the rpcinfo cases).
 
-The probe can also run commands in the sandbox: C `rpcinfo` and `tirpcprobe`
+The probe can also run commands in the sandbox: `rpcinfo` (C, or rpcinfo-rs in the
+rpcinfo cases) and `tirpcprobe`
 ([crates/rpcbind/tests/tirpcprobe.c](crates/rpcbind/tests/tirpcprobe.c)), which calls
 rpcbind through the system libtirpc as RPC services do, optionally as another user.
 Cases can add netkit interfaces, a descriptor limit for the daemon, and a fake clock
 (the LD_PRELOAD shim in `crates/rpcbind/tests/shim/`) that the probe can move. In
 `sync on` mode the probe makes sure the daemon has handled everything sent before it
-reports a missing reply, so cases don't depend on timing. `RPCBIND_FUZZ=SEED:COUNT`
+reports a missing reply, so cases don't depend on timing. For rpcinfo it can serve
+scripted replies over UDP or TCP (`fakesrv`) and answer broadcasts (`responder`) from
+background threads. `RPCBIND_FUZZ=SEED:COUNT`
 adds a longer run of mutated calls (see `crates/rpcbind/tests/diff_hostile.rs`).
 
 ## Roadmap
@@ -150,7 +170,7 @@ adds a longer run of mutated calls (see `crates/rpcbind/tests/diff_hostile.rs`).
    idle and half-open connections, many clients at once, and the cases behind past
    CVEs (CVE-2017-8779 "rpcbomb" and CVE-2015-7236), checked for the same replies and
    bounded memory.
-4. **rpcinfo (planned):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
+4. **rpcinfo (done, PR #5):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
    `-n`), run against both daemons.
 5. **Packaging (planned):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
    conf.d), rehearsed on the test VM with a real NFS client and server stack
