@@ -22,8 +22,8 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Phases 1 to 3 of 5 are done: phases 1 and 2 are merged (PRs #2 and #3) and phase 3,
-hostile input, is on branch `phase3-hostile` (PR #4). The port serves every procedure C
+Phases 1 to 3 of 5 are done and merged (PRs #2, #3 and #4); phase 4, `rpcinfo`, is in
+progress on branch `phase4-rpcinfo`. The port serves every procedure C
 rpcbind does in this build and holds up the same way under floods, stalls and garbage.
 
 Phase 1, the RPC layer in `crates/tirpc` and rpcbind's startup:
@@ -62,7 +62,7 @@ The differential suite has 57 tests (94 cases), all passing: 32 from phase 1, 15
 protocol and 10 for hostile input. Mutants that undo reproduced quirks are caught (four
 in phase 1, five in phase 2, five in phase 3).
 
-Next: phase 4, rpcinfo.
+Phase 4, `rpcinfo` (in progress): not started yet.
 
 The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
 step lands.
@@ -150,7 +150,7 @@ adds a longer run of mutated calls (see `crates/rpcbind/tests/diff_hostile.rs`).
    idle and half-open connections, many clients at once, and the cases behind past
    CVEs (CVE-2017-8779 "rpcbomb" and CVE-2015-7236), checked for the same replies and
    bounded memory.
-4. **rpcinfo (planned):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
+4. **rpcinfo (in progress):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
    `-n`), run against both daemons.
 5. **Packaging (planned):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
    conf.d), rehearsed on the test VM with a real NFS client and server stack
