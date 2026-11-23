@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>scottfk@gmail.com</email>
+	</maintainer>
+	<longdescription>
+		net-nds/rpcbind 1.2.8 with rpcbind and rpcinfo replaced by
+		rpcbind-rs, a strict-compatibility Rust port that doesn't link
+		libtirpc.  The man pages, documents, init script and conf.d are
+		the ones net-nds/rpcbind-1.2.8 installs.
+	</longdescription>
+	<upstream>
+		<remote-id type="github">scottfk/rpcbind-rs</remote-id>
+		<remote-id type="sourceforge">rpcbind</remote-id>
+	</upstream>
+</pkgmetadata>
