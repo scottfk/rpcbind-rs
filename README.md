@@ -22,8 +22,8 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Phases 1 to 4 of 5 are done: phases 1 to 3 are merged (PRs #2, #3 and #4) and phase 4,
-`rpcinfo`, is on branch `phase4-rpcinfo` (PR #5). The port serves every procedure C
+Phases 1 to 4 of 5 are done and merged (PRs #2 to #5); phase 5, packaging, is in
+progress on branch `phase5-ebuild`. The port serves every procedure C
 rpcbind does in this build and holds up the same way under floods, stalls and garbage,
 and rpcinfo-rs gives the same output as C rpcinfo in every mode.
 
@@ -78,7 +78,7 @@ The differential suite has 73 tests (110 cases), all passing: 32 from phase 1, 1
 the protocol, 10 for hostile input and 16 for rpcinfo. Mutants that undo reproduced
 quirks are caught (four in phase 1, five in phase 2, five in phase 3, nine in phase 4).
 
-Next: phase 5, packaging.
+Now: phase 5, packaging (in progress).
 
 The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
 step lands.
@@ -160,19 +160,19 @@ adds a longer run of mutated calls (see `crates/rpcbind/tests/diff_hostile.rs`).
    the local socket and its mode), the privilege drop, signals, `daemon()` and the
    loop. Tested with `NULL` calls on every program and version, and the rejections
    (wrong program, version, procedure, RPC version, auth) for everything else.
-2. **The protocol (done, PR #3):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
+2. **The protocol (merged, PR #3):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
    `SET`/`UNSET` with owners taken from local-socket credentials, `GETADDR` and
    `GETVERSADDR` with `addrmerge()` choosing the interface address, `DUMP`,
    `GETADDRLIST`, `GETTIME`, `UADDR2TADDR`/`TADDR2UADDR`, `GETSTAT` counters, and the
    access checks and `-i`/`-l` logging (`security.c`). Tested with C `rpcinfo`, the
    libtirpc probe and several interfaces in the test namespace.
-3. **Hostile input (done, PR #4):** malformed and truncated XDR, oversized and fragmented records,
+3. **Hostile input (merged, PR #4):** malformed and truncated XDR, oversized and fragmented records,
    idle and half-open connections, many clients at once, and the cases behind past
    CVEs (CVE-2017-8779 "rpcbomb" and CVE-2015-7236), checked for the same replies and
    bounded memory.
-4. **rpcinfo (done, PR #5):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
+4. **rpcinfo (merged, PR #5):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
    `-n`), run against both daemons.
-5. **Packaging (planned):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
+5. **Packaging (in progress):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
    conf.d), rehearsed on the test VM with a real NFS client and server stack
    (`rpc.statd`, `rpc.mountd`, `nfsd`, a mount and file locks), and rolled back through a
    binary package of the C build.
