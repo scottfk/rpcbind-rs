@@ -22,8 +22,8 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-All five phases are done: phases 1 to 4 are merged (PRs #2 to #5), and phase 5,
-packaging, is on branch `phase5-ebuild` (PR #6). The port serves every procedure C
+All five phases are done and merged (PRs #2 to #6). Installing it on hydra is
+still to be decided. The port serves every procedure C
 rpcbind does in this build and holds up the same way under floods, stalls and garbage,
 and rpcinfo-rs gives the same output as C rpcinfo in every mode.
 
@@ -192,7 +192,7 @@ adds a longer run of mutated calls (see `crates/rpcbind/tests/diff_hostile.rs`).
    bounded memory.
 4. **rpcinfo (merged, PR #5):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
    `-n`), run against both daemons.
-5. **Packaging (done, PR #6):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
+5. **Packaging (merged, PR #6):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
    conf.d), rehearsed on the test VM with a real NFS client and server stack
    (`rpc.statd`, `rpc.mountd`, `nfsd`, a mount and file locks), and rolled back through a
    binary package of the C build.
