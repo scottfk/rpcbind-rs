@@ -22,8 +22,8 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-Phases 1 to 4 of 5 are done: phases 1 to 3 are merged (PRs #2, #3 and #4) and phase 4,
-`rpcinfo`, is on branch `phase4-rpcinfo` (PR #5). The port serves every procedure C
+All five phases are done: phases 1 to 4 are merged (PRs #2 to #5), and phase 5,
+packaging, is on branch `phase5-ebuild` (PR #6). The port serves every procedure C
 rpcbind does in this build and holds up the same way under floods, stalls and garbage,
 and rpcinfo-rs gives the same output as C rpcinfo in every mode.
 
@@ -78,7 +78,27 @@ The differential suite has 73 tests (110 cases), all passing: 32 from phase 1, 1
 the protocol, 10 for hostile input and 16 for rpcinfo. Mutants that undo reproduced
 quirks are caught (four in phase 1, five in phase 2, five in phase 3, nine in phase 4).
 
-Next: phase 5, packaging.
+Phase 5, packaging:
+
+- [contrib/gentoo/net-nds/rpcbind](contrib/gentoo/net-nds/rpcbind), the
+  `rpcbind-1.2.8_p9999` live ebuild (see [Installing on Gentoo](#installing-on-gentoo));
+- the rehearsal on the test VM (Gentoo, kernel 6.18, nfs-utils 2.8.5), with
+  [tools/vm-nfscheck.sh](tools/vm-nfscheck.sh) and
+  [tools/vm-bootcheck.sh](tools/vm-bootcheck.sh). The ebuild built and installed over C
+  rpcbind with the same files as C's package, plus the port's README and QUIRKS. Both
+  programs need only libc and libgcc_s. A real NFS server and client then ran on it
+  through OpenRC: `rpc.statd`, `rpc.mountd`, `nfsd`, the kernel's lockd, `rpc.idmapd`,
+  NFSv3 and NFSv4.2 mounts over loopback, file I/O, and contended `flock` and `lockf`
+  locks. The script also restarted rpcbind, which takes its dependents with it, and
+  stopped everything. In all 61 steps rpcbind-rs reported the same as C, call counts
+  in `rpcinfo -m` included. A boot with rpcbind, `nfs` and `nfsclient` in the default
+  runlevel matched as well. The guest then went back to C from a binary package, which
+  matched the first C runs.
+
+The rehearsal found one problem, in the rollback command rather than the port. With a
+binhost configured, `emerge -1K` took the binhost's newer `rpcbind-1.2.8-3`, built with
+`selinux`, and its policy packages over the local quickpkg. `--getbinpkg=n` picks the
+local package.
 
 The plan and its status live in the [roadmap](#roadmap) below, which is updated as each
 step lands.
@@ -98,7 +118,7 @@ The reference build imports exactly the same libc and libtirpc symbols as the in
 binaries. The libtirpc 1.3.7 sources (also Gentoo's tarball) are kept beside it in
 `../libtirpc`, for reading.
 
-## Planned layout
+## Layout
 
 Upstream is about 6,100 lines of C in `src/`, plus the parts of libtirpc it relies on.
 The port follows the files:
@@ -112,8 +132,8 @@ The port follows the files:
 | `crates/rpcbind/src/{security,check_bound,util,xlog}.rs` | access checks and `-l` logging, the transport list, `addrmerge()`, messages |
 | `crates/rpcinfo/` | `rpcinfo.c`: every mode, over the `tirpc` clients |
 | `tests/` | differential tests and the harness |
-| `contrib/gentoo/` | a `net-nds/rpcbind` live ebuild, and how to switch and roll back |
-| `tools/` | the reference build |
+| `contrib/gentoo/` | the `net-nds/rpcbind` live ebuild (see [Installing on Gentoo](#installing-on-gentoo)) |
+| `tools/` | the reference build, and the NFS and boot checks run on the test VM |
 
 ## Testing
 
@@ -160,26 +180,26 @@ adds a longer run of mutated calls (see `crates/rpcbind/tests/diff_hostile.rs`).
    the local socket and its mode), the privilege drop, signals, `daemon()` and the
    loop. Tested with `NULL` calls on every program and version, and the rejections
    (wrong program, version, procedure, RPC version, auth) for everything else.
-2. **The protocol (done, PR #3):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
+2. **The protocol (merged, PR #3):** portmap v2 (`pmap_svc.c`) and rpcbind v3/v4 (`rpcb_svc*.c`):
    `SET`/`UNSET` with owners taken from local-socket credentials, `GETADDR` and
    `GETVERSADDR` with `addrmerge()` choosing the interface address, `DUMP`,
    `GETADDRLIST`, `GETTIME`, `UADDR2TADDR`/`TADDR2UADDR`, `GETSTAT` counters, and the
    access checks and `-i`/`-l` logging (`security.c`). Tested with C `rpcinfo`, the
    libtirpc probe and several interfaces in the test namespace.
-3. **Hostile input (done, PR #4):** malformed and truncated XDR, oversized and fragmented records,
+3. **Hostile input (merged, PR #4):** malformed and truncated XDR, oversized and fragmented records,
    idle and half-open connections, many clients at once, and the cases behind past
    CVEs (CVE-2017-8779 "rpcbomb" and CVE-2015-7236), checked for the same replies and
    bounded memory.
-4. **rpcinfo (done, PR #5):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
+4. **rpcinfo (merged, PR #5):** every mode (`-p`, `-s`, `-m`, `-l`, `-T`, `-u`, `-t`, `-a`, `-b`, `-d`,
    `-n`), run against both daemons.
-5. **Packaging (planned):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
+5. **Packaging (done, PR #6):** a Gentoo ebuild (a `net-nds/rpcbind` drop-in, the same init script and
    conf.d), rehearsed on the test VM with a real NFS client and server stack
    (`rpc.statd`, `rpc.mountd`, `nfsd`, a mount and file locks), and rolled back through a
    binary package of the C build.
 
 Not planned unless needed: the build options hydra doesn't use (warm starts, remote
-calls, TCP wrappers, systemd socket activation, `RPCBIND_DEBUG`). The ebuild will
-require them off.
+calls, TCP wrappers, systemd socket activation, `RPCBIND_DEBUG`). The ebuild doesn't
+offer them.
 
 ### After rpcbind
 
@@ -187,6 +207,35 @@ require them off.
 `rpc.statd` and `sm-notify` first (network-facing, root, a long bug history), then
 `libnfsidmap` (C ABI and plugins) and `rpc.idmapd`. autofs is out of scope for now: it
 is much larger and its behavior can only be tested on a VM with real mounts.
+
+## Installing on Gentoo
+
+[contrib/gentoo/net-nds/rpcbind](contrib/gentoo/net-nds/rpcbind) is
+`rpcbind-1.2.8_p9999`, a drop-in for `net-nds/rpcbind-1.2.8`. It installs the port's
+`/sbin/rpcbind` and `/sbin/rpcinfo`, with the man pages and documents from the
+`rpcbind-1.2.8` tarball and Gentoo's init script and conf.d. The README and QUIRKS
+are added under the docs, in `rpcbind-rs/`. The ebuild is live: it builds this
+repository's `main`, so it has no keywords and is pinned to the 1.2.8 it ports. As
+root, with the ebuild in a local repository (here `localrepo`):
+
+```sh
+cp -r contrib/gentoo/net-nds /var/db/repos/localrepo/
+echo '=net-nds/rpcbind-1.2.8_p9999 **' > /etc/portage/package.accept_keywords/rpcbind
+echo '>net-nds/rpcbind-1.2.8_p9999' > /etc/portage/package.mask/rpcbind
+quickpkg --include-config=y net-nds/rpcbind   # C's package, to go back to
+emerge -1 =net-nds/rpcbind-1.2.8_p9999
+rc-service rpcbind restart
+```
+
+The running rpcbind keeps the old program until it is restarted. A restart loses every
+registration, since there are no warm starts. OpenRC restarts the services that need
+rpcbind (`rpc.statd`, `nfs`, `nfsclient`), and they register again. The kernel's
+lockd does not re-register while NFS mounts keep it running, which is true with C as well.
+To go back, use `emerge -1K --getbinpkg=n =net-nds/rpcbind-1.2.8` (from the binary
+package; without `--getbinpkg=n` a binhost's build, with other flags, can win) or
+`emerge -1 =net-nds/rpcbind-1.2.8`. The flags `debug`, `remotecalls`, `systemd`,
+`tcpd` and `warmstarts` are not offered: the port covers the build hydra uses, with
+all of them off.
 
 ## Contributing
 
