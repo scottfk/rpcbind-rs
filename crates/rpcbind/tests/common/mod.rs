@@ -240,6 +240,10 @@ fn pipe() -> (c_int, c_int) {
 /// fork(); the child enters new user, mount, network and pid namespaces, makes the
 /// binds, and forks pid 1 of the new pid namespace, which execs `sh -c script`. The
 /// child exits with pid 1's status. Returns the child's pid.
+///
+/// Both the child and pid 1 have a parent-death signal of SIGKILL, so the sandbox
+/// can't outlive the test: killing the child (the timeout in `wait`), or the test
+/// process dying, kills pid 1, and with it everything in the pid namespace.
 fn spawn_in_sandbox(binds: &[(CString, CString)], script: &str, stdio: [c_int; 3]) -> u32 {
     // SAFETY: getuid/getgid have no preconditions.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -257,6 +261,8 @@ fn spawn_in_sandbox(binds: &[(CString, CString)], script: &str, stdio: [c_int; 3
     let (up_r, up_w) = pipe();
     let (go_r, go_w) = pipe();
     let root = cstr("/");
+    // SAFETY: getpid has no preconditions.
+    let parent = unsafe { libc::getpid() };
 
     // SAFETY: between fork and exec the child only makes async-signal-safe system calls
     // on memory prepared above, then execs or _exits.
@@ -288,11 +294,22 @@ fn spawn_in_sandbox(binds: &[(CString, CString)], script: &str, stdio: [c_int; 3
             if libc::setgid(0) != 0 || libc::setuid(0) != 0 {
                 libc::_exit(124);
             }
+            // Set after the credential changes, which clear it. The test thread may
+            // already be gone.
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 || libc::getppid() != parent {
+                libc::_exit(128);
+            }
             let init = libc::fork();
             if init < 0 {
                 libc::_exit(125);
             }
             if init == 0 {
+                // pid 1 can't check for a parent already gone (its parent is outside
+                // the pid namespace, so getppid() is 0); the gap is the few
+                // instructions since fork.
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    libc::_exit(129);
+                }
                 for (i, fd) in stdio.iter().enumerate() {
                     libc::dup2(*fd, i as c_int);
                 }
@@ -343,7 +360,8 @@ fn wait(pid: u32, timeout: Duration) -> String {
             return if libc::WIFEXITED(st) { format!("exit {}", libc::WEXITSTATUS(st)) } else { "killed".into() };
         }
         if Instant::now() > deadline {
-            // SAFETY: killing and reaping our own child (the pid namespace goes with it).
+            // SAFETY: killing and reaping our own child. Its death kills pid 1 (the
+            // parent-death signal), which takes the pid namespace with it.
             unsafe {
                 libc::kill(pid as i32, libc::SIGKILL);
                 libc::waitpid(pid as i32, &mut st, 0);
