@@ -30,6 +30,12 @@ NFSv4 mounts carried on. The port serves every procedure C
 rpcbind does in this build and holds up the same way under floods, stalls and garbage,
 and rpcinfo-rs gives the same output as C rpcinfo in every mode.
 
+`crates/tirpc` also serves [nfs-utils-rs](https://github.com/scottfk/nfs-utils-rs):
+`bindresvport_sa()` and reply decoding for its `sm-notify` (PR #11), and for its
+`rpc.statd` the server side rpcbind itself doesn't use: `svc_tli_create()` making its
+own socket (`RPC_ANYFD`), `svc_reg()` with a netconfig (registering with rpcbind through
+`rpcb_set()`), `svc_fdset` and `svc_getreqset()` for a `select()` loop.
+
 Phase 1, the RPC layer in `crates/tirpc` and rpcbind's startup:
 
 - `/etc/netconfig` (`getnetconfig.c`), address conversions (`rpc_generic.c`), XDR

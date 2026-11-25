@@ -5,8 +5,8 @@
 use crate::addr::{self, Netbuf};
 use crate::clnt::{
     self, CacheEntry, Client, Control, Lib, RPC_ANYFD, RPC_CANTDECODEARGS, RPC_FAILED, RPC_N2AXLATEFAILURE,
-    RPC_PMAPFAILURE, RPC_PROGNOTREGISTERED, RPC_PROGUNAVAIL, RPC_PROGVERSMISMATCH, RPC_SUCCESS, RPC_UNKNOWNHOST,
-    RPC_UNKNOWNPROTO, Timeval,
+    RPC_PMAPFAILURE, RPC_PROGNOTREGISTERED, RPC_PROGUNAVAIL, RPC_PROGVERSMISMATCH, RPC_SUCCESS, RPC_UNKNOWNADDR,
+    RPC_UNKNOWNHOST, RPC_UNKNOWNPROTO, Timeval,
 };
 use crate::netconfig::{NC_TPI_CLTS, NC_TPI_COTS, NC_TPI_COTS_ORD, Netconfig};
 use crate::rpcb_prot::{self, Rpcb};
@@ -187,6 +187,44 @@ pub fn local_rpcb(lib: &mut Lib, want_targaddr: bool) -> (Option<Client>, Option
     }
     let (nc, host) = lib.loopnconf.clone().unwrap();
     getclnthandle(lib, Some(host), Some(&nc), want_targaddr)
+}
+
+/// `rpcb_set()`: register `address` (a transport address for `nconf`) through the
+/// local rpcbind; the reply's boolean (FALSE when the call fails).
+pub fn rpcb_set(lib: &mut Lib, prog: u32, vers: u32, nconf: Option<&Netconfig>, address: Option<&Netbuf>) -> bool {
+    let Some(nconf) = nconf else {
+        lib.createerr.stat = RPC_UNKNOWNPROTO;
+        return false;
+    };
+    let Some(address) = address else {
+        lib.createerr.stat = RPC_UNKNOWNADDR;
+        return false;
+    };
+    let (Some(mut client), _) = local_rpcb(lib, false) else {
+        return false;
+    };
+    let Some(uaddr) = addr::taddr2uaddr(nconf, address) else {
+        client.destroy();
+        lib.createerr.stat = RPC_N2AXLATEFAILURE;
+        return false;
+    };
+    let parms =
+        Rpcb { prog, vers, netid: nconf.netid.clone(), addr: uaddr, owner: sys::geteuid().to_string().into_bytes() };
+    let mut rslt = false;
+    client.call(
+        RPCBPROC_SET,
+        &mut |x| rpcb_prot::put_rpcb(x, &parms),
+        &mut |x| match xdr::get_bool(x) {
+            Some(b) => {
+                rslt = b;
+                true
+            }
+            None => false,
+        },
+        TOTTIMEOUT,
+    );
+    client.destroy();
+    rslt
 }
 
 /// `rpcb_unset()`: unset through the local rpcbind; the reply's boolean (FALSE when
