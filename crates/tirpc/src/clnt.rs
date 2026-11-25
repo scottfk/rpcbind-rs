@@ -158,25 +158,25 @@ const AUTHNONE: [u8; 16] = [0; 16];
 
 /// What `xdr_replymsg()` decoded.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ReplyMsg {
-    xid: u32,
+pub struct ReplyMsg {
+    pub xid: u32,
     /// `rp_stat`: 0 accepted, 1 denied.
-    rp_stat: i32,
+    pub rp_stat: i32,
     /// `ar_stat` or `rj_stat`.
-    stat: i32,
+    pub stat: i32,
     /// `ar_vers`/`rj_vers` (low, high) or `rj_why` in the first word.
-    w: [u32; 2],
+    pub w: [u32; 2],
 }
 
 impl ReplyMsg {
     /// `MSG_ACCEPTED` with `SUCCESS`.
-    pub(crate) fn accepted_success(&self) -> bool {
+    pub fn accepted_success(&self) -> bool {
         self.rp_stat == 0 && self.stat == 0
     }
 }
 
 /// `xdr_replymsg()` decoding, with `xdr_void` for the results (they are decoded after).
-pub(crate) fn decode_reply(x: &mut dyn XdrDecode) -> Option<ReplyMsg> {
+pub fn decode_reply(x: &mut dyn XdrDecode) -> Option<ReplyMsg> {
     let xid = x.get_long()?;
     let dir = xdr::get_i32(x)?;
     if dir != 1 {
@@ -1015,11 +1015,27 @@ fn load_blacklist() -> Vec<u16> {
 
 /// `bindresvport(fd, NULL)`: bind to a reserved port, starting from one picked by pid.
 pub fn bindresvport(lib: &mut Lib, fd: Fd) -> i32 {
+    bindresvport_sa(lib, fd, None)
+}
+
+/// `bindresvport_sa()`: bind `fd` to a reserved port, starting from one picked by pid,
+/// at the address in `sa` (a `sockaddr_in` or `sockaddr_in6`, whose port is
+/// overwritten with each one tried, as C does), or with `None` at the socket's own
+/// unbound address (`getsockname()`).
+pub fn bindresvport_sa(lib: &mut Lib, fd: Fd, sa: Option<&mut [u8]>) -> i32 {
     if lib.resv_blacklist.is_none() {
         lib.resv_blacklist = Some(load_blacklist());
     }
-    let Some((mut ss, _)) = sys::getsockname(fd) else {
-        return -1;
+    let mut own;
+    let ss: &mut [u8] = match sa {
+        Some(sa) => sa,
+        None => {
+            let Some((s, _)) = sys::getsockname(fd) else {
+                return -1;
+            };
+            own = s;
+            &mut own
+        }
     };
     let af = i32::from(u16::from_ne_bytes([ss[0], ss[1]]));
     let salen = match af {
@@ -1030,13 +1046,19 @@ pub fn bindresvport(lib: &mut Lib, fd: Fd) -> i32 {
             return -1;
         }
     };
+    if ss.len() < salen {
+        sys::set_errno(libc::EINVAL);
+        return -1;
+    }
     let mut port = u16::from_be_bytes([ss[2], ss[3]]);
     let mut startport = lib.resv_startport;
     let mut nports = usize::from(ENDPORT - startport + 1);
     let mut endport = ENDPORT;
     let npts = ENDPORT - STARTPORT + 1;
     if port == 0 {
-        port = (sys::getpid() as u16 % npts) + STARTPORT;
+        // getpid() % NPORTS on the full pid: truncating it to 16 bits first gives
+        // another port for pids over 65535.
+        port = (sys::getpid() as u32 % u32::from(npts)) as u16 + STARTPORT;
     }
     let black = lib.resv_blacklist.clone().unwrap_or_default();
     let mut res = -1;
@@ -1046,7 +1068,7 @@ pub fn bindresvport(lib: &mut Lib, fd: Fd) -> i32 {
         while i < nports {
             if !black.contains(&port) {
                 ss[2..4].copy_from_slice(&port.to_be_bytes());
-                res = sys::bind(fd, &ss, salen);
+                res = sys::bind(fd, ss, salen);
                 if res >= 0 || sys::errno() != libc::EADDRINUSE {
                     break;
                 }
