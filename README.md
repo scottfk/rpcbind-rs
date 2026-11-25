@@ -22,8 +22,11 @@ something fun for me to tinker with in Claude.
 
 ## Status
 
-All five phases are done and merged (PRs #2 to #6). Installing it on hydra is
-still to be decided. The port serves every procedure C
+All five phases are done and merged (PRs #2 to #6). I am now eating my own dogfood,
+running it on hydra, my daily driver, as I do the other -rs ports: since 2026-11-25
+`/sbin/rpcbind` and `rpcinfo` there are this port, installed with the ebuild below,
+with no libtirpc in either. After the restart `rpc.statd` registered again and the
+NFSv4 mounts carried on. The port serves every procedure C
 rpcbind does in this build and holds up the same way under floods, stalls and garbage,
 and rpcinfo-rs gives the same output as C rpcinfo in every mode.
 
