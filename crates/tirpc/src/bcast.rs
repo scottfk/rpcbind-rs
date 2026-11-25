@@ -251,7 +251,7 @@ fn broadcast(
             for bip in &f.nal {
                 sys::setsockopt_int(f.fd, libc::SOL_SOCKET, libc::SO_BROADCAST, 1);
                 if !lib.lowvers && sys::sendto(f.fd, &outbuf[..outlen], Some((&bip.addr, f.asize))) != outlen as isize {
-                    warnx(b"rpc_broadcast_exp: cannot send broadcast packet");
+                    sys::warnx(b"rpc_broadcast_exp: cannot send broadcast packet");
                     stat = RPC_CANTSEND;
                     continue;
                 }
@@ -261,7 +261,7 @@ fn broadcast(
                     && sys::sendto(f.fd, &outbuf_pmap[..outlen_pmap], Some((&bip.addr, f.asize)))
                         != outlen_pmap as isize
                 {
-                    warnx(b"clnt_bcast: Cannot send broadcast packet");
+                    sys::warnx(b"clnt_bcast: Cannot send broadcast packet");
                     stat = RPC_CANTSEND;
                     continue;
                 }
@@ -298,7 +298,7 @@ fn broadcast(
                     }
                 };
                 let Ok(inlen) = inlen else {
-                    warnx(b"clnt_bcast: Cannot receive reply to broadcast");
+                    sys::warnx(b"clnt_bcast: Cannot receive reply to broadcast");
                     stat = RPC_CANTRECV;
                     continue;
                 };
@@ -376,13 +376,4 @@ fn ipv6v4_fixup(ss: &[u8; SS_LEN], uaddr: &[u8]) -> Option<Netbuf> {
     let mut sin = ss[..size_of::<libc::sockaddr_in>()].to_vec();
     sin[2..4].copy_from_slice(&maxlen[2..4]);
     Some(Netbuf::from_bytes(&sin))
-}
-
-/// `warnx(msg)`.
-fn warnx(msg: &[u8]) {
-    let mut m = sys::progname();
-    m.extend_from_slice(b": ");
-    m.extend_from_slice(msg);
-    m.push(b'\n');
-    sys::c_stderr(&m);
 }

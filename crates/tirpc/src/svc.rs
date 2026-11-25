@@ -119,6 +119,8 @@ pub struct Svc {
     maxrec: usize,
     dtablesize: usize,
     cred_area: CredArea,
+    /// `svc_fdset`: the registered descriptors below `FD_SETSIZE`, as `select()` wants.
+    fdset: [u64; FD_SETSIZE as usize / 64],
 }
 
 impl Default for Svc {
@@ -135,6 +137,7 @@ impl Default for Svc {
             maxrec: 0,
             dtablesize,
             cred_area: CredArea::default(),
+            fdset: [0; FD_SETSIZE as usize / 64],
         }
     }
 }
@@ -413,6 +416,9 @@ impl Svc {
             return false;
         }
         self.xports[fd as usize] = Some(xprt);
+        if (fd as i64) < FD_SETSIZE {
+            self.fdset[fd as usize / 64] |= 1 << (fd % 64);
+        }
         if let Some(slot) = self.pollfd.iter_mut().find(|p| p.fd == -1) {
             slot.fd = fd;
             slot.events = POLL_EVENTS;
@@ -428,12 +434,24 @@ impl Svc {
             return None;
         }
         let x = self.xports[fd as usize].take()?;
+        if (fd as i64) < FD_SETSIZE {
+            self.fdset[fd as usize / 64] &= !(1 << (fd % 64));
+        }
         for p in &mut self.pollfd {
             if p.fd == fd {
                 p.fd = -1;
             }
         }
         Some(x)
+    }
+
+    /// Unregister the transport on `fd` without closing it: what's left of
+    /// `xprt->xp_fd = RPC_ANYFD; SVC_DESTROY(xprt)` once its descriptor was closed
+    /// elsewhere. (In C that unregisters nothing, as the descriptor no longer matches,
+    /// and leaves the freed transport in the table; that only follows an `fcntl()`
+    /// failing on a new socket.)
+    pub fn forget_xprt(&mut self, fd: Fd) {
+        self.xprt_unregister(fd);
     }
 
     /// `SVC_DESTROY()`: unregister and close.
@@ -444,7 +462,8 @@ impl Svc {
     }
 
     /// `svc_tli_create(fd, nconf, bindaddr, sendsz, recvsz)` for a socket rpcbind made
-    /// and bound itself. `bindaddr` is used only if the socket isn't bound yet.
+    /// and bound itself. `bindaddr` is used only if the socket isn't bound yet (and then
+    /// with a `qlen` of 0).
     pub fn svc_tli_create(
         &mut self,
         fd: Fd,
@@ -453,24 +472,82 @@ impl Svc {
         sendsz: usize,
         recvsz: usize,
     ) -> Option<Fd> {
-        let si = fd2sockinfo(fd)?;
-        if !sockisbound(fd) {
-            let b = bindaddr?;
-            if sys::bind(fd, &b.buf, si.alen) < 0 {
+        self.svc_tli_create_bind(fd, nconf, bindaddr.map(|b| (b, 0)), sendsz, recvsz)
+    }
+
+    /// `svc_tli_create(fd, nconf, bindaddr, sendsz, recvsz)`, with the `t_bind`'s address
+    /// and `qlen`. With `fd` [`RPC_ANYFD`](crate::clnt::RPC_ANYFD), a socket is made
+    /// for `nconf` and bound to `bindaddr`. The transport is registered, and the
+    /// descriptor returned.
+    ///
+    /// Not ported: binding an unbound socket without a `bindaddr` (`__binddynport()`,
+    /// a random port), which neither rpcbind nor nfs-utils does; it fails here.
+    pub fn svc_tli_create_bind(
+        &mut self,
+        fd: Fd,
+        nconf: Option<&Netconfig>,
+        bindaddr: Option<(&Netbuf, i32)>,
+        sendsz: usize,
+        recvsz: usize,
+    ) -> Option<Fd> {
+        let (fd, si, madefd) = if fd == crate::clnt::RPC_ANYFD {
+            let Some(nc) = nconf else {
+                sys::warnx(b"svc_tli_create: invalid netconfig");
+                return None;
+            };
+            let fd = nconf2fd(nc);
+            if fd == -1 {
+                let mut m = b"svc_tli_create: could not open connection for ".to_vec();
+                m.extend_from_slice(&nc.netid);
+                sys::warnx(&m);
                 return None;
             }
-            // bindaddr->qlen is never set by rpcbind; this path isn't reached there.
-            sys::listen(fd, 0);
+            // __rpc_nconf2sockinfo(): nconf2fd() made a socket, so it has one.
+            let si = addr::nconf2sockinfo(nc).unwrap_or(SockInfo { af: 0, proto: 0, socktype: 0, alen: 0 });
+            (fd, si, true)
+        } else {
+            let Some(si) = fd2sockinfo(fd) else {
+                sys::warnx(b"svc_tli_create: could not get transport information");
+                return None;
+            };
+            (fd, si, false)
+        };
+        let fail = |fd: Fd| {
+            if madefd {
+                sys::close(fd);
+            }
+            None
+        };
+        if madefd || !sockisbound(fd) {
+            let Some((b, qlen)) = bindaddr else {
+                sys::warnx(b"svc_tli_create: could not bind to anonymous port");
+                return fail(fd);
+            };
+            if sys::bind(fd, &b.buf, si.alen) < 0 {
+                sys::warnx(b"svc_tli_create: could not bind to requested address");
+                return fail(fd);
+            }
+            sys::listen(fd, qlen);
         }
         let mut xprt = match si.socktype {
             libc::SOCK_STREAM => {
                 if sys::getpeername(fd).is_some() {
-                    return None; // svc_fd_create(): an accepted socket; rpcbind never passes one
+                    // svc_fd_create(): an accepted socket; no caller passes one.
+                    return fail(fd);
                 }
-                self.vc_create(fd, &si, sendsz, recvsz)?
+                match self.vc_create(fd, &si, sendsz, recvsz) {
+                    Some(x) => x,
+                    None => return fail(fd),
+                }
             }
-            libc::SOCK_DGRAM => self.dg_create(fd, &si, sendsz, recvsz)?,
-            _ => return None,
+            libc::SOCK_DGRAM => match self.dg_create(fd, &si, sendsz, recvsz) {
+                Some(x) => x,
+                None => return fail(fd),
+            },
+            _ => {
+                sys::warnx(b"svc_tli_create: bad service type");
+                return fail(fd);
+            }
         };
         if let Some(nc) = nconf {
             xprt.netid = Some(nc.netid.clone());
@@ -531,6 +608,69 @@ impl Svc {
         }
         self.callouts.insert(0, Callout { prog, vers, netid, dispatch });
         true
+    }
+
+    /// `svc_reg(xprt, prog, vers, dispatch, nconf)`: the callout is for the transport's
+    /// netid (or else `nconf`'s), and the transport's address is registered with the
+    /// local rpcbind (`rpcb_set()`), whose answer is returned. A program and version
+    /// already registered for that netid with the same `dispatch` is registered with
+    /// rpcbind again; with another `dispatch` it fails.
+    pub fn svc_reg_nconf(
+        &mut self,
+        lib: &mut crate::clnt::Lib,
+        fd: Fd,
+        prog: u32,
+        vers: u32,
+        dispatch: u32,
+        nconf: &Netconfig,
+    ) -> bool {
+        let Some(x) = self.xprt(fd) else {
+            return false;
+        };
+        let netid = x.netid.clone().unwrap_or_else(|| nconf.netid.clone());
+        let ltaddr = x.ltaddr.clone();
+        match self.find(prog, vers, Some(&netid)) {
+            Some(s) if s.dispatch != dispatch => return false,
+            Some(_) => {}
+            None => {
+                self.callouts.insert(0, Callout { prog, vers, netid: Some(netid.clone()), dispatch });
+                if let Some(Some(x)) = self.xports.get_mut(fd as usize)
+                    && x.netid.is_none()
+                {
+                    x.netid = Some(netid);
+                }
+            }
+        }
+        crate::rpcb_clnt::rpcb_set(lib, prog, vers, Some(nconf), Some(&ltaddr))
+    }
+
+    /// `svc_fdset`, for `select()`.
+    pub fn fdset(&self) -> libc::fd_set {
+        // SAFETY: fd_set is plain bits; all-zero is the empty set.
+        let mut set: libc::fd_set = unsafe { std::mem::zeroed() };
+        for fd in 0..FD_SETSIZE as i32 {
+            if self.fdset[fd as usize / 64] & (1 << (fd % 64)) != 0 {
+                // SAFETY: fd is below FD_SETSIZE.
+                unsafe { libc::FD_SET(fd, &mut set) };
+            }
+        }
+        set
+    }
+
+    /// `svc_getreqset()`: handle each descriptor set in `readfds`, lowest first, over the
+    /// words of the set that start below the table's size.
+    pub fn getreqset(&mut self, svc: &mut dyn Service, readfds: &libc::fd_set, stdout: &mut Vec<u8>) {
+        // The credential area is on svc_getreq_common()'s frame, which select()
+        // callers reach from a fixed depth.
+        self.cred_area.set_poll_slots(0);
+        // Whole words of the set, while a word starts below the table's size.
+        let words = self.dtablesize.div_ceil(64).min(FD_SETSIZE as usize / 64) as i32;
+        for fd in 0..words * 64 {
+            // SAFETY: fd is below FD_SETSIZE.
+            if unsafe { libc::FD_ISSET(fd, readfds) } {
+                self.getreq_common(svc, fd, stdout);
+            }
+        }
     }
 
     /// `svc_register(xprt, prog, vers, dispatch, 0)`: a callout for any netid. (No

@@ -303,6 +303,15 @@ pub fn c_stderr(b: &[u8]) {
     unsafe { libc::fwrite(b.as_ptr().cast(), 1, b.len(), stderr) };
 }
 
+/// `warnx(msg)`: `progname: msg` on stderr.
+pub fn warnx(msg: &[u8]) {
+    let mut m = progname();
+    m.extend_from_slice(b": ");
+    m.extend_from_slice(msg);
+    m.push(b'\n');
+    c_stderr(&m);
+}
+
 /// `exit(status)`: runs C's atexit handlers and flushes stdio, as upstream's `exit()`.
 pub fn exit(status: i32) -> ! {
     // SAFETY: exit never returns.
