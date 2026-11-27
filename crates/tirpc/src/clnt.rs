@@ -277,6 +277,8 @@ struct Vc {
     mcall: [u8; 24],
     mpos: usize,
     rec: RecStream,
+    /// `cl_auth`'s marshalled credential and verifier.
+    auth: Vec<u8>,
 }
 
 /// `struct cu_data`.
@@ -294,11 +296,16 @@ struct Dg {
     inbuf: Vec<u8>,
     connect: bool,
     connected: bool,
+    /// `cl_auth`'s marshalled credential and verifier.
+    auth: Vec<u8>,
 }
 
 /// `CLNT_CONTROL` requests that rpcinfo and libtirpc's own callers make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Control {
+    /// `CLSET_TIMEOUT`: a stream client's wait for each call (it then ignores
+    /// the call's own timeout), a datagram client's total time.
+    SetTimeout(Timeval),
     SetFdClose,
     SetFdNclose,
     SetVers(u32),
@@ -432,6 +439,7 @@ pub fn clnt_vc_create(
             mcall,
             mpos: 5 * UNIT,
             rec: RecStream::new(sendsz, recvsz, 0),
+            auth: AUTHNONE.to_vec(),
         })),
     })
 }
@@ -481,6 +489,7 @@ pub fn clnt_dg_create(
             inbuf: vec![0u8; recvsz],
             connect: false,
             connected: false,
+            auth: AUTHNONE.to_vec(),
         })),
     })
 }
@@ -525,8 +534,49 @@ impl Client {
                 cu.wait = t;
             }
             (Transport::Vc(_), Control::SetRetryTimeout(_)) => return false,
+            (Transport::Vc(ct), Control::SetTimeout(t)) => {
+                if vc_time_not_ok(&t) {
+                    return false;
+                }
+                ct.wait = t;
+                ct.waitset = true;
+            }
+            (Transport::Dg(cu), Control::SetTimeout(t)) => {
+                if dg_time_not_ok(&t) {
+                    return false;
+                }
+                cu.total = t;
+            }
         }
         true
+    }
+
+    /// `cl_auth = authunix_create_default()`: calls carry an `AUTH_SYS`
+    /// credential (made now, as libtirpc marshals it at create time) with a null
+    /// verifier. False (with `rpc_createerr` set) if it can't be made.
+    pub fn set_auth_unix_default(&mut self, lib: &mut Lib) -> bool {
+        let Some(body) = crate::bcast::authunix_default(lib) else {
+            return false;
+        };
+        let mut m = Vec::with_capacity(body.len() + 20);
+        m.extend_from_slice(&crate::rpc::AUTH_SYS.to_be_bytes());
+        m.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        m.extend_from_slice(&body);
+        m.resize(8 + crate::xdr::rndup(body.len()), 0);
+        m.extend_from_slice(&[0u8; 8]);
+        match &mut self.t {
+            Transport::Vc(ct) => ct.auth = m,
+            Transport::Dg(cu) => cu.auth = m,
+        }
+        true
+    }
+
+    /// `auth_destroy(cl_auth)` and back to `AUTH_NONE`.
+    pub fn set_auth_none(&mut self) {
+        match &mut self.t {
+            Transport::Vc(ct) => ct.auth = AUTHNONE.to_vec(),
+            Transport::Dg(cu) => cu.auth = AUTHNONE.to_vec(),
+        }
     }
 
     /// `CLGET_FD`.
@@ -587,7 +637,7 @@ fn vc_call(ct: &mut Vc, proc_: u32, args: Args<'_>, results: Results<'_>, timeou
     }
     // shipnow: results are never NULL here.
     let shipnow = true;
-    let Vc { fd, wait, error, mcall, mpos, rec, .. } = ct;
+    let Vc { fd, wait, error, mcall, mpos, rec, auth, .. } = ct;
     let mut io = VcIo { fd: *fd, ms: wait.ms(), error };
     io.error.status = RPC_SUCCESS;
     // x_id = ntohl(--(*msg_x_id)): the decrement is of the network-order word as a
@@ -597,7 +647,7 @@ fn vc_call(ct: &mut Vc, proc_: u32, args: Args<'_>, results: Results<'_>, timeou
     let x_id = u32::from_be_bytes(mcall[0..4].try_into().unwrap());
     let ok = {
         let mut e = rec.encoder(&mut io);
-        e.put_bytes(&mcall[..*mpos]) && e.put_long(proc_) && e.put_bytes(&AUTHNONE) && args(&mut e)
+        e.put_bytes(&mcall[..*mpos]) && e.put_long(proc_) && e.put_bytes(auth) && args(&mut e)
     };
     if !ok {
         if io.error.status == RPC_SUCCESS {
@@ -656,7 +706,7 @@ fn dg_call(cu: &mut Dg, proc_: u32, args: Args<'_>, results: Results<'_>, utimeo
         let pos = cu.xdrpos;
         let len = cu.outbuf.len();
         let mut x = XdrMem::resume(&mut cu.outbuf, pos, len - pos);
-        if !(x.put_long(proc_) && x.put_bytes(&AUTHNONE) && args(&mut x)) {
+        if !(x.put_long(proc_) && x.put_bytes(&cu.auth) && args(&mut x)) {
             cu.error.status = RPC_CANTENCODEARGS;
             return cu.error.status;
         }
@@ -1300,4 +1350,76 @@ pub fn pcreateerror(lib: &mut Lib, s: &[u8]) {
 /// The address family of a netconfig entry, for callers that build addresses.
 pub fn nconf_af(nc: &Netconfig) -> Option<i32> {
     addr::nconf2sockinfo(nc).map(|s| s.af)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::UdpSocket;
+    use std::os::fd::IntoRawFd;
+
+    /// A datagram client to `server`, a socket on 127.0.0.1.
+    fn dg_client(lib: &mut Lib, server: &UdpSocket) -> Client {
+        let port = server.local_addr().unwrap().port();
+        // SAFETY: an all-zero sockaddr_in is valid.
+        let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        sin.sin_family = libc::AF_INET as libc::sa_family_t;
+        sin.sin_port = port.to_be();
+        sin.sin_addr.s_addr = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+        // SAFETY: sin is a plain C struct; viewed as its bytes.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(&sin as *const _ as *const u8, std::mem::size_of::<libc::sockaddr_in>())
+        };
+        let fd = UdpSocket::bind("127.0.0.1:0").unwrap().into_raw_fd();
+        clnt_dg_create(lib, fd, &Netbuf::from_bytes(bytes), 100005, 3, 0, 0).expect("client")
+    }
+
+    #[test]
+    fn auth_unix_credential_and_timeout() {
+        let mut lib = Lib::default();
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut cl = dg_client(&mut lib, &server);
+        cl.control(Control::SetFdClose);
+        assert!(cl.set_auth_unix_default(&mut lib));
+        // A total of 300ms: the call times out without an answer, well before
+        // the 25s it's given.
+        assert!(cl.control(Control::SetTimeout(Timeval { sec: 0, usec: 300_000 })));
+        let start = std::time::Instant::now();
+        let st = cl.call(5, &mut |_| true, &mut |_| true, Timeval::secs(25));
+        assert_eq!(st, RPC_TIMEDOUT);
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        let mut buf = [0u8; 1024];
+        let n = server.recv(&mut buf).unwrap();
+        let w = |b: &[u8], i: usize| u32::from_be_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+        // xid, CALL, rpcvers 2, prog, vers, proc, then the credential.
+        assert_eq!((w(&buf, 1), w(&buf, 2), w(&buf, 3), w(&buf, 4), w(&buf, 5)), (0, 2, 100005, 3, 5));
+        assert_eq!(w(&buf, 6), crate::rpc::AUTH_SYS);
+        let len = w(&buf, 7) as usize;
+        let after = 8 + len / 4;
+        // stamp, machine name, uid, gid, groups...; then a null verifier.
+        let name_len = w(&buf, 9) as usize;
+        let host = sys::gethostname().unwrap();
+        assert_eq!(&buf[40..40 + name_len], &host[..]);
+        assert_eq!(w(&buf, 10 + name_len.div_ceil(4)), sys::geteuid());
+        assert_eq!((w(&buf, after), w(&buf, after + 1)), (0, 0));
+        assert_eq!(n, (after + 2) * 4);
+        // Back to AUTH_NONE.
+        cl.set_auth_none();
+        let _ = cl.call(5, &mut |_| true, &mut |_| true, Timeval::secs(25));
+        let n = server.recv(&mut buf).unwrap();
+        assert_eq!(n, 40);
+        assert_eq!(w(&buf, 6), crate::rpc::AUTH_NONE);
+        cl.destroy();
+    }
+
+    #[test]
+    fn set_timeout_rejects_bad_values() {
+        let mut lib = Lib::default();
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut cl = dg_client(&mut lib, &server);
+        assert!(!cl.control(Control::SetTimeout(Timeval { sec: -2, usec: 0 })));
+        assert!(cl.control(Control::SetTimeout(Timeval { sec: -1, usec: -1 })));
+        cl.destroy();
+    }
 }

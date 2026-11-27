@@ -24,7 +24,7 @@ const MAX_MACHINE_NAME: usize = 255;
 
 /// `authunix_create_default()`: the marshalled `AUTH_SYS` body, or `None` (and
 /// `RPC_SYSTEMERROR`). It clears `rpc_createerr` first.
-fn authunix_default(lib: &mut Lib) -> Option<Vec<u8>> {
+pub(crate) fn authunix_default(lib: &mut Lib) -> Option<Vec<u8>> {
     lib.createerr = Default::default();
     let fail = |lib: &mut Lib, e: i32| {
         lib.createerr.error.set_errno(e);
