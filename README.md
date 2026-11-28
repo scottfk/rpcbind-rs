@@ -36,6 +36,10 @@ and rpcinfo-rs gives the same output as C rpcinfo in every mode.
 own socket (`RPC_ANYFD`), `svc_reg()` with a netconfig (registering with rpcbind through
 `rpcb_set()`), `svc_fdset` and `svc_getreqset()` for a `select()` loop.
 
+And [autofs-rs](https://github.com/scottfk/autofs-rs), for the automounter's NFS probes
+and export lists (PR #13): `CLSET_TIMEOUT` (`Control::SetTimeout`) and an `AUTH_SYS`
+credential on a client (`authunix_create_default()` as `cl_auth`).
+
 Phase 1, the RPC layer in `crates/tirpc` and rpcbind's startup:
 
 - `/etc/netconfig` (`getnetconfig.c`), address conversions (`rpc_generic.c`), XDR
